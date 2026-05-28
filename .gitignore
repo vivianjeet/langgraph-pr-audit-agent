@@ -1,7 +1,11 @@
-#Knowledge
+# Knowledge
 knowledge.md
 quiz_agent.md
 
-#Python environment
+# Python 
+## environment
 venv/
 .env
+
+## Cache
+__pycache__/

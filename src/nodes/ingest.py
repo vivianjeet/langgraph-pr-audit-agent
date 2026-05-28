@@ -6,7 +6,7 @@ def parse_github_diff(diff_text: str) -> str:
     Parses a raw git diff and extracts added/modified lines per file.
     Reduces token usage by stripping out unchanged context lines
     """
-    parsed_output = []
+    parsed_output: list[str] = []
     current_file = None
 
     # Regex to match the start of a new file diff

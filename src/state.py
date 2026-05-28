@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import TypedDict, Annotated, List
+from typing import TypedDict, Annotated, List, Optional
 import operator
 
 class Severity(str, Enum):
@@ -20,11 +20,11 @@ class SecurityFinding(BaseModel):
 
 class AuditState(TypedDict):
     # LangGraph requires a messages list, operator.add appends instead of overwriting
-    messages: Annotated[list, operator.add]
+    messages: Annotated[list[str], operator.add]
 
     # The list of structured findings the agent has disscovered
-    security_findings: Annotated[List[SecurityFinding],operator.add]
+    security_findings: Optional[Annotated[List[SecurityFinding],operator.add]]
 
     # Routing and Safety Flags
-    human_decision: str | None
-    iteration_count: int
+    human_decision: Optional[str]
+    iteration_count: Optional[int]
