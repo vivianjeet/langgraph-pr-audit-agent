@@ -23,7 +23,11 @@ def parse_github_diff(diff_text: str) -> str:
         # Capture added lines (starting with +, but not the +++ header)
         if line.startswith('+') and not line.startswith('+++'):
             if current_file:
-                parsed_output.append(line)
+                parsed_output.append(f"[ADDED]: {line[1:]}")
+        # Capture removed lines
+        if line.startswith('-') and not line.startswith('---'):
+            if current_file:
+                parsed_output.append(f"[REMOVED]: {line[1:]}")
 
     return "\n".join(parsed_output)
 
