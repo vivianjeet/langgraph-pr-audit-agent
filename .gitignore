@@ -1,2 +1,6 @@
 #Knowledge
 knowledge.md
+
+#Python environment
+venv/
+.env
