@@ -1,13 +1,11 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from src.state import AuditState
+from src.nodes.ingest import ingest_pr_node
 
 #=================================================================
 # Node Stubs
 #=================================================================
-
-def ingest_pr_node(state: AuditState):
-    return {"messages" : ["System: Ingested PR data"]}
 
 def retrieve_context_node(state: AuditState):
     return {"messages" : ["System: Retrieved similar PR history"]}
