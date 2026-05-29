@@ -1,6 +1,6 @@
 from enum import Enum
 from pydantic import BaseModel, Field
-from typing import TypedDict, Annotated, List, Optional
+from typing import TypedDict, Annotated
 import operator
 
 class Severity(str, Enum):
@@ -12,19 +12,19 @@ class Severity(str, Enum):
     NONE = "none"
 
 class SecurityFinding(BaseModel):
-    file_path: str = Field(description = "The file where the issue was found")
-    line_number: int = Field(description = "The specific line number")
-    description: str = Field(description = "Detailed explaination of the vulnerability")
-    cwe_id: str = Field(description = "The Common Weakness Enumeration ID (eg. CWE-89)")
+    file_path:str = Field(description = "The file where the issue was found")
+    line_number:int = Field(description = "The specific line number")
+    description:str = Field(description = "Detailed explaination of the vulnerability")
+    cwe_id:str = Field(description = "The Common Weakness Enumeration ID (eg. CWE-89)")
     severity: Severity
 
 class AuditState(TypedDict):
     # LangGraph requires a messages list, operator.add appends instead of overwriting
-    messages: Annotated[list[str], operator.add]
+    messages: Annotated[list, operator.add]
 
     # The list of structured findings the agent has disscovered
-    security_findings: Optional[Annotated[List[SecurityFinding],operator.add]]
+    security_findings: Annotated[list[SecurityFinding],operator.add]
 
     # Routing and Safety Flags
-    human_decision: Optional[str]
-    iteration_count: Optional[int]
+    human_decision: str
+    iteration_count: int

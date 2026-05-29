@@ -7,7 +7,7 @@ def run_smoke_test():
     print("   Initiating Smoke test   \n")
     print("=============================================\n")
     current_dir = Path(__file__)
-    file_path = current_dir.parent / "files/sample_diff.txt"
+    file_path = current_dir.parent / "files/smoke_test_sample_diff.txt"
 
     sample_diff = open(file_path,"r").read()
 
