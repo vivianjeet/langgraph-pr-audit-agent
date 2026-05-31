@@ -9,24 +9,46 @@ This project uses **LangGraph** to orchestrate a team of specialized AI agents t
 
 ### Core Technologies:
 - **LangGraph:** Stateful multi-agent orchestration and routing.
-- **Gemini 2.5 Turbo:** Core LLM reasoning engine (via `google-genai`).
+- **Gemini 2.5 Flash (audits) + Gemini 2.5 Pro (reflexion):** Core LLM reasoning engine (via `google-genai`).
 - **Instructor:** Enforces strict structured JSON outputs (Pydantic V2 schemas).
 - **Python 3.12+:** Core language.
 
 ---
 
-## 🏗️ Architecture (In Progress)
+## 🏗️ Architecture
 
-Currently, the agent workflow follows this graph topology:
-1. **Ingest Node:** Parses raw PR diffs via regex to extract `[ADDED]` and `[REMOVED]` lines securely.
-2. **Context Retrieval:** (Stub) Will pull historically similar PRs.
-3. **Plan Node:** (Stub) Generates an execution plan.
-4. **Audit Nodes (Parallel):**
-   - `security_audit_node`: Validates against security vulnerabilities.
-   - `quality_audit_node`: (Stub) Validates clean code practices.
-   - `test_audit_node`: (Stub) Checks test coverage.
-5. **Synthesize & Reflexion:** Routes findings, self-critiques, and formats reports.
-6. **Human-in-the-loop:** Pauses execution for human approval before finalization.
+```mermaid
+graph TD
+    START --> ingest
+    ingest --> retrieve
+    retrieve --> plan
+    plan --> security_audit
+    plan --> quality_audit
+    plan --> coverage_audit
+    security_audit --> synthesize
+    quality_audit --> synthesize
+    coverage_audit --> synthesize
+    synthesize -->|borderline 0.5-0.7| reflexion
+    synthesize -->|critical / score<0.5| human_review
+    synthesize -->|clean| finalize
+    reflexion --> plan
+    human_review --> finalize
+    finalize --> END
+```
+
+**Routing rules** (precedence: human review > reflect > finalize)
+- `should_reflect`: **any** of the three scores (security/quality/test) in [0.5, 0.7], OR an auth-related file changed with zero **security** findings ("suspicious silence" - security-only heuristic). Capped at 2 loops (`iteration_count` guard).
+
+- `needs_human_review`: any CRITICAL finding (any dimension), or **any** score < 0.5. Graph pauses here (`interrupt_before`).
+
+
+### How the pipeline works
+1. **Ingest** parses the raw diff into added/removed lines + a `files_changed` list.
+2. **Plan** (`gemini-2.5-flash`) triages the diff once - produces an `AuditPlan` (focus areas, risk level, audit depth). This is **Plan-Execute**: the three audits each receive a *targeted* brief instead of re-reading the whole diff cold.
+3. **Three audits run in parallel** - security (OWASP/SQLi/PII/authn), quality (smells, magic numbers, DRY/SOLID), and coverage (missing tests). All are **plan-aware** (they read `audit_plan.focus_areas`).
+4. **Synthesize** computes deterministic, severity-weighted scores ($0, no LLM) the router can act on.
+5. **Reflexion** (`gemini-2.5-pro`) - on a borderline result, a *smarter* model critiques the audit, identifies gaps, and loops back to plan for a sharper second pass (max 2 loops).
+6. **Human review / finalize** - escalate on critical findings, otherwise finalize.
 
 ---
 
@@ -67,11 +89,17 @@ Unit tests run instantly and cost $0, asserting that your deterministic logic (l
 ```bash
 # Run tests with verbose output
 pytest -v
+
+# Fast, $0 unit tests (mocked LLM) - excludes live integration tests
+pytest -m "not integration" -v
 ```
 
 ### Run the E2E Smoke Test
-The smoke test pushes a sample SQL-injection PR diff through the entire LangGraph state machine and makes live calls to Gemini.
+The smoke tests push sample PR diffs through the entire LangGraph state machine with **live** Gemini calls. Two scenarios are included:
+- **SQL-injection diff** → high-risk path: escalates and pauses at `human_review`.
+- **Borderline diff** (mediocre code, no critical issues) → triggers the **reflexion** self-critique loop.
+
 ```bash
-# Run the full graph smoke test
+# Run the full graph smoke tests
 python main.py --test
 ```

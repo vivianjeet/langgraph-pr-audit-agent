@@ -29,8 +29,9 @@ def main():
 
     if args.test:
         # import smoke tests function and run it
-        from tests.smoke_test import run_smoke_test
+        from tests.smoke_test import run_smoke_test, run_smoke_test_without_human
         run_smoke_test()
+        run_smoke_test_without_human()
     else:
         print("LangGraph PR Audit Agent is ready.")
         print("Run 'python main.py --test' to execute the smoke test.")
