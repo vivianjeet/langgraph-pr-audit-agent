@@ -1,20 +1,8 @@
-# this node checks for security of the code changes, 
-# using a ReAct pattern to elicit detailed reasoning from the LLM 
-# and to ensure a comprehensive analysis.
-import os
-import instructor
-from google import genai
+# Checks the security of the code changes. Uses a ReAct pattern so the
+# LLM reasons step by step before it reports findings.
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 from src.state import SecurityFinding, AuditState
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-load_dotenv()
-
-# initialise instructor client with Gemini (Gemini 2.5 Turbo)
-# client = instructor.from_genai(genai(api_key=os.environ.get("GEMINI_API_KEY")))
-genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-client = instructor.from_genai(genai_client)
+from src.llm_retry import call_gemini, QuotaExhaustedError
 
 FAST_MODEL = "gemini-2.5-flash"
 SMALL_TOKEN_COUNT = 4000
@@ -30,21 +18,6 @@ class SecurityAuditOutput(BaseModel):
     findings: list[SecurityFinding] = Field(
         default_factory=list,
         description= "List of identified security vulnerabilities. Emppty if none found"
-    )
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
-def _call_gemini(messages):
-    return client.chat.completions.create(
-        model=FAST_MODEL,
-        messages=messages,
-        response_model=SecurityAuditOutput,
-        max_retries=2,
-        generation_config={"max_output_tokens": SMALL_TOKEN_COUNT},
     )
 
 def security_audit_node(state: AuditState):
@@ -86,11 +59,16 @@ def security_audit_node(state: AuditState):
         {"role": "user", "content": user_prompt.replace("{{diff}}",parsed_diff)},
     ]
     try:
-        response = _call_gemini(messages)
+        response = call_gemini(model=FAST_MODEL,messages=messages,
+                               response_model=SecurityAuditOutput,
+                               max_output_tokens=SMALL_TOKEN_COUNT)
+    except QuotaExhaustedError:
+        raise
     except Exception as e:
         return {
             "messages": [f"System: security_audit failed after retries ({type(e).__name__}); no findings recorded."],
             "security_findings": [],
+            "node_errors": [f"security_audit: {type(e).__name__} - {str(e)}"]
         }
 
     #Format a system message summary

@@ -29,6 +29,14 @@ def synthesize_report_node(state: AuditState):
     sec_score = _weighted_score(sec)
     qual_score = _weighted_score(qual)
     test_score = _weighted_score(test)
+
+    # FAIL CLOSED: if an AUDIT node errored out (not just plan), it returned empty
+    # findings -> a 1.0 here would be a FALSE clean. Force max risk so routing escalates.
+    errors = state.get("node_errors", [])
+    audit_errors = [e for e in errors if e.split(":")[0] in
+                    ("security_audit", "quality_audit", "coverage_audit")]
+    if audit_errors:
+        sec_score = qual_score = test_score = 0.0
     
     summary = (
         f"System: Synthesized report. \n"
@@ -37,6 +45,9 @@ def synthesize_report_node(state: AuditState):
         f"test_score = {test_score},"
         f"(security={len(sec)}, quality={len(qual)}, test={len(test)} findings)"
     )
+
+    if audit_errors:
+        summary += f"\n⚠ FAIL-CLOSED: audit node(s) errored, scores forced to 0.0: {audit_errors}"
     
     return {
         "messages" : [summary],

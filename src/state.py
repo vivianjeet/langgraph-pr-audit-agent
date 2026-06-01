@@ -91,3 +91,8 @@ class AuditState(TypedDict):
     audit_plan: dict
     confidence_score: float # reflection's own confidence the audit is complete
     gaps_identified: list[str] # what the first pass likely missed
+
+    similar_prs: list # retrieved precedent audits
+    final_report: str # markdown report produced by finalize
+
+    node_errors: Annotated[list[str], operator.add] # any errors nodes want to report but not raise (eg; audit degraded due to LLM issues, but we still want a report)

@@ -4,11 +4,11 @@ import pytest
 from src.state import AuditPlan, Severity, AuditDepth
 import src.nodes.plan as plan_mod
 from src.nodes.plan import PlanAuditOutput as PlanOut
-
+import src.llm_retry as llm_retry
 
 @pytest.fixture
 def patched_create():
-    with patch.object(plan_mod.client.chat.completions, "create") as mock_create:
+    with patch.object(llm_retry, "_raw_chat") as mock_create:
         yield mock_create
 
 
@@ -48,12 +48,13 @@ def test_plan_skips_when_no_diff(patched_create, empty):
     assert "skipped" in out["messages"][0]
 
 
-def test_plan_falls_back_on_api_error(patched_create):
-    patched_create.side_effect = RuntimeError("boom")
-    with patch("time.sleep"):                              # skip tenacity's backoff waits
-        out = plan_mod.plan_audit_node(
-            {"parsed_diff": "[FILE]: x.py\n+ a=1", "files_changed": ["x.py"], "messages": []}
-        )
-    assert patched_create.call_count == 3                  # tenacity retried 3x
-    assert out["audit_plan"]["audit_depth"] == "shallow"   # default plan
-    assert "failed after retries" in out["messages"][0]
+def test_plan_falls_back_on_nonretryable_error(patched_create):
+    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
+    out = plan_mod.plan_audit_node({"parsed_diff": "x", "messages": []})
+    patched_create.assert_called_once()
+    assert out["audit_plan"]["audit_depth"] == "shallow"
+
+def test_plan_degrades_on_transient_error(patched_create):
+    patched_create.side_effect = RuntimeError("503 Service Unavailable")
+    out = plan_mod.plan_audit_node({"parsed_diff": "x", "files_changed": [], "messages": []})
+    assert out["audit_plan"]["audit_depth"] == "shallow"

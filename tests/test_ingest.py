@@ -1,6 +1,4 @@
-import pytest
 from src.nodes.ingest import parse_github_diff, ingest_pr_node
-from src.state import AuditState
 
 sample_diff = """
 diff --git a/payment_gateway.py b/payment_gateway.py

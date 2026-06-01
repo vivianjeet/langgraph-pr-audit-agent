@@ -1,16 +1,7 @@
 # Test-coverage auditor: flags missing/weak tests for changed code (ReAct + Instructor)
-import os
-import instructor
-from google import genai
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 from src.state import CoverageFinding, AuditState
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-load_dotenv()
-
-gennai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-client = instructor.from_genai(gennai_client)
+from src.llm_retry import call_gemini, QuotaExhaustedError
 
 FAST_MODEL = "gemini-2.5-flash"
 SMALL_TOKEN_COUNT = 4000
@@ -31,21 +22,6 @@ class CoverageAuditOutput(BaseModel):
         description= ("List of identified test coverage issues. Missing or inadequate tests. "
             "Empty if none found"
         )
-    )
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
-def _call_gemini(messages):
-    return client.chat.completions.create(
-        model=FAST_MODEL,
-        messages=messages,
-        response_model=CoverageAuditOutput,
-        max_retries=2,
-        generation_config={"max_output_tokens": SMALL_TOKEN_COUNT},
     )
 
 def coverage_audit_node(state: AuditState):
@@ -78,11 +54,16 @@ def coverage_audit_node(state: AuditState):
             {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
         ]
     try:
-        response = _call_gemini(messages)
+        response = call_gemini(model=FAST_MODEL, messages = messages,
+                               response_model=CoverageAuditOutput,
+                               max_output_tokens=SMALL_TOKEN_COUNT)
+    except QuotaExhaustedError:
+        raise
     except Exception as e:
         return {
             "messages": [f"System: coverage_audit failed after retries ({type(e).__name__}); no findings recorded."],
             "test_findings": [],
+            "node_errors": [f"coverage_audit: {type(e).__name__} - {str(e)}"]
         }
 
     new_message = (

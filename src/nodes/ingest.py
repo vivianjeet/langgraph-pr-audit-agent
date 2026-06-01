@@ -1,7 +1,7 @@
 import re
 from src.state import AuditState
 
-def parse_github_diff(diff_text: str) -> str:
+def parse_github_diff(diff_text: str) -> tuple[str, list[str]]:
     """
     Parses a raw git diff and extracts added/modified lines per file.
     Reduces token usage by stripping out unchanged context lines

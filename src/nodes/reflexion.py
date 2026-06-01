@@ -1,17 +1,7 @@
 # Reflection : a SMARTER model critiques the audit and decides if a second pass is warranted
-
-import os
-import instructor
-from google import genai
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 from src.state import AuditState
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-load_dotenv()
-
-genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-client = instructor.from_genai(genai_client)
+from src.llm_retry import call_gemini, QuotaExhaustedError
 
 SMART_MODEL = "gemini-2.5-pro"
 MEDIUM_TOKEN_COUNT = 6000
@@ -37,20 +27,6 @@ class ReflectionOutput(BaseModel):
         description="How confident the critic is that the audit is now complete (0-1)"
     )
 
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
-def _call_gemini(messages):
-    return client.chat.completions.create(
-        model=SMART_MODEL,
-        messages=messages,
-        response_model=ReflectionOutput,
-        max_retries=2,
-        generation_config={"max_output_tokens": MEDIUM_TOKEN_COUNT},
-    )
 def reflexion_node(state: AuditState):
     """Critique the synthesized report; append critique to history; bump the loop guard"""
     current = state.get("iteration_count",0)
@@ -100,11 +76,15 @@ def reflexion_node(state: AuditState):
             {"role" : "user", "content" : user_prompt}
         ]
     try:
-        critique = _call_gemini(messages)
+        critique = call_gemini(model=SMART_MODEL, messages=messages,
+                               response_model=ReflectionOutput,
+                               max_output_tokens=MEDIUM_TOKEN_COUNT)
+    except QuotaExhaustedError:
+        raise
     except Exception as e:
         return {
             "messages": [f"System: reflection failed after retries ({type(e).__name__}); no findings recorded."],
-            "security_findings": [],
+            "iteration_count": current + 1
         }
 
     msg = (

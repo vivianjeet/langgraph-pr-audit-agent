@@ -40,3 +40,33 @@ def test_synthesize_writes_all_three_scores():
     assert out["security_score"] == pytest.approx(0.4)
     assert out["quality_score"] == 1.0
     assert out["test_score"] == 1.0
+
+
+def test_synthesize_fails_closed_when_audit_errored():
+    # An audit node hit its except -> empty findings. synthesize must NOT report a
+    # false-clean 1.0; force 0.0 so routing escalates to human review.
+    out = synthesize_report_node({
+        "security_findings": [], "quality_findings": [], "test_findings": [],
+        "node_errors": ["security_audit: RuntimeError - 503 UNAVAILABLE"],
+    })
+    assert out["security_score"] == 0.0
+    assert out["quality_score"] == 0.0
+    assert out["test_score"] == 0.0
+
+
+def test_synthesize_ignores_plan_only_error():
+    # A plan failure still lets the audits run on the default plan, so a plan-only
+    # error must NOT force escalation - that would cry wolf on every degraded plan.
+    out = synthesize_report_node({
+        "security_findings": [], "quality_findings": [], "test_findings": [],
+        "node_errors": ["plan: RuntimeError - boom"],
+    })
+    assert out["security_score"] == 1.0
+
+
+def test_synthesize_clean_run_without_node_errors_key():
+    # Normal path: no node_errors key at all -> .get default [] -> no forcing.
+    out = synthesize_report_node({
+        "security_findings": [_f(Severity.LOW)], "quality_findings": [], "test_findings": [],
+    })
+    assert out["security_score"] == pytest.approx(0.93)   # the LOW penalty, unforced

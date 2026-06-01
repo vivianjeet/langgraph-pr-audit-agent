@@ -4,12 +4,13 @@ import pytest
 from src.state import SecurityFinding, Severity
 import src.nodes.security_audit as sec_mod
 from src.nodes.security_audit import SecurityAuditOutput
+import src.llm_retry as llm_retry
 
 @pytest.fixture
 def patched_create():
     """
     Patch the LLM once, each test sets .return_value to the fake it needs"""
-    with patch.object(sec_mod.client.chat.completions, "create") as mock_create:
+    with patch.object(llm_retry, "_raw_chat") as mock_create:
         yield mock_create
 
 def _finding(severity):
@@ -38,10 +39,13 @@ def test_security_audit_hits_real_llm(vuln_diff):
     out = sec_mod.security_audit_node({"parsed_diff": vuln_diff, "messages" : []})
     assert isinstance(out["security_findings"], list)
 
-def test_security_audit_falls_back_on_api_error(patched_create):
-    patched_create.side_effect = RuntimeError("boom")
-    with patch("time.sleep"):
-        out = sec_mod.security_audit_node({"parsed_diff": "x", "messages": []})
-    assert patched_create.call_count == 3
+def test_security_audit_falls_back_on_nonretryable_error(patched_create):
+    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
+    out = sec_mod.security_audit_node({"parsed_diff": "x", "messages": []})
+    patched_create.assert_called_once()
     assert out["security_findings"] == []
-    assert "failed after retries" in out["messages"][0]
+
+def test_security_audit_degrades_on_transient_error(patched_create):
+    patched_create.side_effect = RuntimeError("503 Service Unavailable")
+    out = sec_mod.security_audit_node({"parsed_diff": "x", "messages": []})
+    assert out["security_findings"] == []

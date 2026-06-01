@@ -3,10 +3,11 @@ import pytest
 from src.state import CoverageFinding, Severity
 import src.nodes.coverage_audit as coverage_mod
 from src.nodes.coverage_audit import CoverageAuditOutput
+import src.llm_retry as llm_retry
 
 @pytest.fixture
 def patched_create():
-    with patch.object(coverage_mod.client.chat.completions, "create") as mock_create:
+    with patch.object(llm_retry, "_raw_chat") as mock_create:
         yield mock_create
 
 def _finding(severity):
@@ -31,10 +32,13 @@ def test_coverage_audit_skips_when_no_diff(patched_create, empty):
     assert out["test_findings"] == []
     assert "skipped" in out["messages"][0]
 
-def test_coverage_audit_falls_back_on_api_error(patched_create):
-    patched_create.side_effect = RuntimeError("boom")
-    with patch("time.sleep"):                    # skip tenacity's backoff waits
-        out = coverage_mod.coverage_audit_node({"parsed_diff": "x", "messages": []})
-    assert patched_create.call_count == 3        # tenacity retried 3x
+def test_coverage_audit_falls_back_on_nonretryable_error(patched_create):
+    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
+    out = coverage_mod.coverage_audit_node({"parsed_diff": "x", "messages": []})
+    patched_create.assert_called_once()
     assert out["test_findings"] == []
-    assert "failed after retries" in out["messages"][0]
+
+def test_coverage_audit_degrades_on_transient_error(patched_create):
+    patched_create.side_effect = RuntimeError("503 Service Unavailable")
+    out = coverage_mod.coverage_audit_node({"parsed_diff": "x", "messages": []})
+    assert out["test_findings"] == []

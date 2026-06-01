@@ -1,18 +1,8 @@
-# this node uses AI to check for code quality issues in the PR, such as code smells, maintainability concerns, or adherence to best practices. 
-# It uses a ReAct pattern to the security audit node to ensure detailed reasoning and comprehensive analysis.
-import os
-import instructor
-from google import genai
+# Checks the PR for code-quality issues: code smells, maintainability, best practices.
+# Same ReAct pattern as the security node, so the LLM reasons before it reports.
 from pydantic import BaseModel, Field
-from dotenv import load_dotenv
 from src.state import QualityFinding, AuditState
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
-
-load_dotenv()
-
-genai_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-client = instructor.from_genai(genai_client)
+from src.llm_retry import call_gemini, QuotaExhaustedError
 
 FAST_MODEL = "gemini-2.5-flash"
 SMALL_TOKEN_COUNT = 4000
@@ -31,21 +21,6 @@ class QualityAuditOutput(BaseModel):
     findings: list[QualityFinding] = Field(
         default_factory=list,
         description= "List of identified quality issues. Empty if none found."
-    )
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    retry=retry_if_exception_type(Exception),
-    reraise=True,
-)
-def _call_gemini(messages):
-    return client.chat.completions.create(
-        model=FAST_MODEL,
-        messages=messages,
-        response_model=QualityAuditOutput,
-        max_retries=2,
-        generation_config={"max_output_tokens": SMALL_TOKEN_COUNT},
     )
 
 def quality_audit_node(state: AuditState):
@@ -84,11 +59,16 @@ def quality_audit_node(state: AuditState):
             {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
         ]
     try:
-        response = _call_gemini(messages)
+        response = call_gemini(model=FAST_MODEL, messages=messages,
+                               response_model=QualityAuditOutput,
+                               max_output_tokens=SMALL_TOKEN_COUNT)
+    except QuotaExhaustedError:
+        raise
     except Exception as e:
         return {
             "messages": [f"System: quality_audit failed after retries ({type(e).__name__}); no findings recorded."],
             "quality_findings": [],
+            "node_errors": [f"quality_audit: {type(e).__name__} - {str(e)}"]
         }
 
     new_message = (

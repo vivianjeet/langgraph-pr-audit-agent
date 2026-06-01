@@ -15,50 +15,10 @@ index 83db48f..f9a2498 100644
      return cursor.fetchone()
 """
 
-sample_diff_no_human = """
-diff --git a/src/services/order_service.py b/src/services/order_service.py
-index 1a2b3c4..5d6e7f8 100644
---- a/src/services/order_service.py
-+++ b/src/services/order_service.py
-@@ -12,6 +12,18 @@ class OrderService:
-     def __init__(self, repo):
-         self.repo = repo
- 
-+    def apply_discount(self, order_total, customer_tier):
-+        # Magic numbers, no validation, deeply nested branching.
-+        if customer_tier == 1:
-+            if order_total > 1000:
-+                return order_total * 0.85
-+            else:
-+                return order_total * 0.95
-+        elif customer_tier == 2:
-+            return order_total * 0.90
-+        else:
-+            return order_total
-+
-+    def process_refund(self, order_id, amount):
-+        try:
-+            order = self.repo.get(order_id)
-+            order.balance = order.balance - amount
-+            self.repo.save(order)
-+        except Exception:
-+            pass  # swallow all errors silently
-"""
-
-def run_smoke_test_without_human():
-    """ Executes a smoke test with mock SQL - injection PR diff - deflects to reflexion"""
-    print("=============================================\n")
-    print("   Initiating Smoke test without human intervention  \n")
-    print("=============================================\n")
-
-    run_audit(sample_diff_no_human)
-
-    print("=============================================\n")
-    print("   Smoke test complete - no human intervention   \n")
-    print("=============================================\n")
-
 def run_smoke_test():
-    """ Executes a smoke test with mock SQL - injection PR diff - deflects to human intervention"""
+    """End-to-end smoke test on a SQL-injection auth diff. Exercises the whole graph:
+    ingest -> retrieve -> plan -> 3 audits -> synthesize -> (critical finding) ->
+    human_review interrupt. The most complete single routing path."""
     print("=============================================\n")
     print("   Initiating Smoke test   \n")
     print("=============================================\n")

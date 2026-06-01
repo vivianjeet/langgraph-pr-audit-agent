@@ -8,20 +8,17 @@ from src.nodes.coverage_audit import coverage_audit_node
 from src.nodes.synthesize_report import synthesize_report_node
 from src.nodes.plan import plan_audit_node
 from src.nodes.reflexion import reflexion_node
+from src.nodes.retrieve import retrieve_context_node
+from src.nodes.finalize import finalize_report_node
 from src.state import Severity
 
 #=================================================================
 # Node Stubs
 #=================================================================
 
-def retrieve_context_node(state: AuditState):
-    return {"messages" : ["System: Retrieved similar PR history"]}
-
 def human_review_node(state: AuditState):
     return {"messages" : ["System: Human Approved Report"]}
 
-def finalize_report_node(state: AuditState):
-    return {"messages" : ["System: Finalized and published report"]}
 
 #=================================================================
 # Routing Logic
