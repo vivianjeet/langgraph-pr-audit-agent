@@ -1,6 +1,10 @@
-#Knowledge
-knowledge.md
-
-#Python environment
+# Python
+## environment
 venv/
 .env
+
+## Cache
+__pycache__/
+.pytest_cache/
+*.egg-info/
+.coverage

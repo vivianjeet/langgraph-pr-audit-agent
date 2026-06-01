@@ -1,0 +1,60 @@
+from unittest.mock import patch
+import pytest
+
+from src.state import AuditPlan, Severity, AuditDepth
+import src.nodes.plan as plan_mod
+from src.nodes.plan import PlanAuditOutput as PlanOut
+import src.llm_retry as llm_retry
+
+@pytest.fixture
+def patched_create():
+    with patch.object(llm_retry, "_raw_chat") as mock_create:
+        yield mock_create
+
+
+def _output(focus, files):
+    return PlanOut(
+        reasoning="auth + raw SQL = high blast radius",
+        plan=AuditPlan(focus_areas=focus, risk_level=Severity.HIGH,
+                       audit_depth=AuditDepth.DEEP, files_to_prioritize=files),
+    )
+
+
+def test_plan_writes_plan_to_state(patched_create):
+    patched_create.return_value = _output(["sql injection"], ["auth/login.py"])
+    out = plan_mod.plan_audit_node(
+        {"parsed_diff": "[FILE]: auth/login.py\n+ q=...", "files_changed": ["auth/login.py"], "messages": []}
+    )
+    patched_create.assert_called_once()
+    assert out["audit_plan"]["audit_depth"] == "deep"
+    assert out["audit_plan"]["risk_level"] == "high"
+    assert out["audit_plan"]["focus_areas"] == ["sql injection"]
+
+
+def test_plan_filters_hallucinated_files(patched_create):
+    # model returns a file that isn't in the diff -> must be dropped
+    patched_create.return_value = _output(["x"], ["auth/login.py", "ghost.py"])
+    out = plan_mod.plan_audit_node(
+        {"parsed_diff": "[FILE]: auth/login.py\n+ q=...", "files_changed": ["auth/login.py"], "messages": []}
+    )
+    assert out["audit_plan"]["files_to_prioritize"] == ["auth/login.py"]
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\n"])
+def test_plan_skips_when_no_diff(patched_create, empty):
+    out = plan_mod.plan_audit_node({"parsed_diff": empty, "files_changed": [], "messages": []})
+    patched_create.assert_not_called()
+    assert out["audit_plan"]["audit_depth"] == "shallow"   # the default plan
+    assert "skipped" in out["messages"][0]
+
+
+def test_plan_falls_back_on_nonretryable_error(patched_create):
+    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
+    out = plan_mod.plan_audit_node({"parsed_diff": "x", "messages": []})
+    patched_create.assert_called_once()
+    assert out["audit_plan"]["audit_depth"] == "shallow"
+
+def test_plan_degrades_on_transient_error(patched_create):
+    patched_create.side_effect = RuntimeError("503 Service Unavailable")
+    out = plan_mod.plan_audit_node({"parsed_diff": "x", "files_changed": [], "messages": []})
+    assert out["audit_plan"]["audit_depth"] == "shallow"
