@@ -2,17 +2,10 @@
 from pydantic import BaseModel, Field
 from src.llm_retry import call_gemini, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
+from src.state import REFLEXION_SIGNAL_PREFIXES as RELEVANT_PREFIXES
 
 SMART_MODEL = "gemini-2.5-pro"
 MEDIUM_TOKEN_COUNT = 6000
-
-RELEVANT_PREFIXES = (
-    "System: Audit plan",
-    "System: Security checks complete",
-    "System: Quality checks complete",
-    "System: Test audit completed",
-    "System: Synthesized report"
-)
 
 
 class ReflectionOutput(BaseModel):

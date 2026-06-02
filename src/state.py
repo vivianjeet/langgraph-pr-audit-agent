@@ -112,3 +112,27 @@ class AuditState(TypedDict):
 # src/memory.py, because they are memory-system concerns: AMS owns the four-channel
 # state. This module stays the domain/schema leaf (findings, plan, AuditState) and
 # imports nothing of ours, so memory.py can import AuditState from here without a cycle.
+
+# --- Signal-message prefixes: the canonical "this line carries decision/finding
+# signal" vocabulary, defined ONCE so reflexion (critique input) and compression
+# (no-LLM fallback keep-list) can't drift. Grouped by phase; consumers slice.
+# Every emit site uses startswith on these exact prefixes (see nodes/ and graph.py).
+PLAN_PREFIX = "System: Audit plan"
+AUDIT_RESULT_PREFIXES = (
+    "System: Security checks complete",
+    "System: Quality checks complete",
+    "System: Test audit completed",
+)
+SYNTHESIS_PREFIX = "System: Synthesized report"
+DECISION_PREFIXES = (                       # only exist post-synthesis
+    "System: Human",
+    "System: Final report",
+)
+
+# Reflexion critiques the audit INPUTS (plan + results + synthesis); decisions
+# don't exist yet when it runs, so they're intentionally excluded.
+REFLEXION_SIGNAL_PREFIXES = (PLAN_PREFIX, *AUDIT_RESULT_PREFIXES, SYNTHESIS_PREFIX)
+
+# Compression's no-LLM fallback keeps EVERYTHING decision-bearing across a whole
+# session = reflexion's set PLUS the post-synthesis decisions.
+COMPRESSION_SIGNAL_PREFIXES = (*REFLEXION_SIGNAL_PREFIXES, *DECISION_PREFIXES)
