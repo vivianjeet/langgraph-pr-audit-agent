@@ -1,7 +1,7 @@
 # Reflection : a SMARTER model critiques the audit and decides if a second pass is warranted
 from pydantic import BaseModel, Field
-from src.state import AuditState
 from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.memory import AgentMemorySystem as AMS, AMSState
 
 SMART_MODEL = "gemini-2.5-pro"
 MEDIUM_TOKEN_COUNT = 6000
@@ -27,13 +27,14 @@ class ReflectionOutput(BaseModel):
         description="How confident the critic is that the audit is now complete (0-1)"
     )
 
-def reflexion_node(state: AuditState):
+def reflexion_node(state: AMSState):
     """Critique the synthesized report; append critique to history; bump the loop guard"""
-    current = state.get("iteration_count",0)
-    
+    ams = AMS(state)
+    current = ams.read("iteration_count",0)
+
     # Walk newest->oldest; keep the first time we see each prefix, skip older dupes
     latest = {}
-    for m in reversed(state.get("messages",[])):
+    for m in reversed(ams.read("messages",[])):
         text = str(m)
         for prefix in RELEVANT_PREFIXES:
             if text.startswith(prefix) and prefix not in latest:
@@ -43,12 +44,12 @@ def reflexion_node(state: AuditState):
     # Give the critic the recent transcript so that it can reason about what 
     # was/wasn't checked.
     transcript = "\n".join(latest[p] for p in RELEVANT_PREFIXES if p in latest)
-    sec_findings = state.get("security_findings",[])
-    quality_findings = state.get("quality_findings",[])
-    test_findings = state.get("test_findings",[])
-    sec_score = state.get("security_score",1.0)
-    quality_score = state.get("quality_score",1.0)
-    test_score = state.get("test_score",1.0)
+    sec_findings = ams.read("security_findings",[])
+    quality_findings = ams.read("quality_findings",[])
+    test_findings = ams.read("test_findings",[])
+    sec_score = ams.read("security_score",1.0)
+    quality_score = ams.read("quality_score",1.0)
+    test_score = ams.read("test_score",1.0)
 
     system_prompt = (
         "You are a principal security reviewer auditing ANOTHER reviewer's work on a PR. "
@@ -82,10 +83,10 @@ def reflexion_node(state: AuditState):
     except QuotaExhaustedError:
         raise
     except Exception as e:
-        return {
+        return {"audit": {
             "messages": [f"System: reflection failed after retries ({type(e).__name__}); no findings recorded."],
             "iteration_count": current + 1
-        }
+        }}
 
     msg = (
         f"System: Reflexion (iteration {current + 1}).\n"
@@ -94,9 +95,9 @@ def reflexion_node(state: AuditState):
         f"Critic confidence: {critique.confidence_score}\n"
     )
 
-    return {
+    return {"audit": {
         "messages": [msg],
         "iteration_count": current + 1,
         "confidence_score": critique.confidence_score,
         "gaps_identified": critique.gaps_identified
-    }
+    }}

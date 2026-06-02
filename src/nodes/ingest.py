@@ -1,5 +1,5 @@
 import re
-from src.state import AuditState
+from src.memory import AgentMemorySystem as AMS, AMSState
 
 def parse_github_diff(diff_text: str) -> tuple[str, list[str]]:
     """
@@ -31,13 +31,14 @@ def parse_github_diff(diff_text: str) -> tuple[str, list[str]]:
 
     return "\n".join(parsed_output), files_changed
 
-def ingest_pr_node(state: AuditState):
+def ingest_pr_node(state: AMSState):
     """Ingests the raw PR diff from the user and parses it"""
+    ams = AMS(state)
     # We assume the very first human message contains our raw PR diff
-    raw_diff = state.get("messages",[""])[-1]
+    raw_diff = ams.read("messages",[""])[-1]
     parsed_diff, files_changed = parse_github_diff(raw_diff)
-    return {
+    return {"audit": {
         "messages":[f"System: Ingested PR data. Extracted changes:\n{parsed_diff}"],
         "parsed_diff": parsed_diff,
         "files_changed": files_changed,
-    }
+    }}

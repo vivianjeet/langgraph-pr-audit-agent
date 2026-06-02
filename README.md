@@ -12,7 +12,7 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 - **Gemini 2.5 Flash (audits) + Gemini 2.5 Pro (reflexion):** Core LLM reasoning engine (via `google-genai`).
 - **Instructor:** Enforces strict structured JSON outputs (Pydantic V2 schemas).
 - **Python 3.12+:** Core language.
-- **pgvector (Postgres 16, Docker):** Vector store for similar-PR precedent retrieval (HNSW, cosine > 0.7).
+- **pgvector (Postgres 16, Docker):** Backs the agent's persistent memory (HNSW, cosine > 0.7) - see [Agent Memory](#-agent-memory-four-types-one-system).
 - **Gemini Embeddings (`gemini-embedding-001`, 768-dim):** Embeds diffs for retrieval.
 - **LangSmith:** Tracing + custom output-quality evaluators.
 - **Resilience layer (`src/llm_retry.py`):** Centralized retry / quota-aware backoff / API-key rotation across every Gemini call, with fail-closed semantics.
@@ -67,6 +67,62 @@ Every Gemini call routes through `src/llm_retry.py`, which:
 
 ---
 
+## 🧠 Agent Memory (four types, one system)
+
+The agent doesn't just react to the PR in front of it - it remembers. Memory is organised as four
+types under one entry point, `AgentMemorySystem` (`src/memory.py`), borrowing the standard
+cognitive split so each kind of memory has a clear job:
+
+| Type | Holds | Where it lives | Retrieved by |
+|------|-------|----------------|--------------|
+| **In-context** | The live run's working state (diff, findings, scores) | `AuditState`, in the graph | direct read |
+| **Semantic** | Similar past PR audits (precedent) | `pr_audits` (pgvector) | cosine similarity |
+| **Episodic** | Compressed past-session summaries | `session_episodes` (pgvector) | cosine similarity |
+| **Procedural** | Org audit rules / templates, keyed by category | `procedural_rules` (Postgres) | exact category lookup |
+
+The persistent three share one embed + pgvector spine; procedural is a plain keyed table (a rule is
+looked up by name, not by similarity, so it needs no embedding). Embeddings are memoised per process
+(`vectorstore.embed`, bounded LRU) so the same diff embedded by more than one node in a run costs a
+single API call.
+
+**The state *is* the memory system.** The graph runs on a nested `AMSState`: an `audit` substate
+(the in-context `AuditState`) plus `semantic` / `episodic` / `procedural` channels as siblings. The
+catch with nesting: LangGraph's reducers only apply to top-level channels, so a custom `merge_audit`
+reducer restores the per-field accumulation the audit substate needs - without it the parallel audit
+fan-out (security/quality/coverage all write at once) would silently clobber each other's messages.
+
+**All four types feed the audit, not just store data.** Memory is recalled once per run (in
+`retrieve`) into the shared channels, then consumed where it's useful:
+
+- **Semantic + episodic** precedent flows into the **plan** node, which uses "have we seen a change
+  like this before?" to steer triage (focus areas, audit depth).
+- **Procedural** rules are injected **verbatim** into each audit node's prompt, per domain - the
+  security auditor sees the security rules, quality sees quality rules, coverage sees coverage rules
+  - so a standing org rule is enforced to the letter, not just paraphrased into a focus area.
+
+This closes the loop: retrieved context actually changes the audit, rather than being stored and
+ignored.
+
+### Rules have a lifecycle (and the agent can propose its own)
+
+Procedural rules carry a `status` so the system can tell a trusted policy from an unvetted
+suggestion:
+
+| Status | Origin | Injected into audits? |
+|--------|--------|------------------------|
+| `seeded` | Human-authored baseline policy | Yes - active immediately |
+| `learned_pending` | Proposed by the agent from its own findings | **No** - awaiting human review |
+| `learned_approved` | A human approved a pending rule | Yes |
+
+After an audit, the agent promotes its strongest findings (critical/high only, deduplicated) into
+**proposed** rules - but they land as `learned_pending` and are **never enforced until a human
+approves them**. This is deliberate: a rule derived from the agent's own output is a feedback loop,
+and a single false positive would otherwise become a permanent rule injected into every future
+audit. So the agent *proposes*; a human *approves*. Only `seeded` and `learned_approved` rules ever
+reach a prompt.
+
+---
+
 ## 🚀 How to Install & Start
 
 ### 1. Clone & Environment Setup
@@ -98,8 +154,30 @@ copy .env.template .env
 ### 4. Start the vector store (Docker)
 The agent persists each audit to pgvector so future similar PRs can retrieve precedent.
 ```bash
-docker compose up -d        # starts pgvector/pgvector:pg16 on $POSTGRES_PORT
+docker compose up -d              # starts pgvector/pgvector:pg16 on $POSTGRES_PORT
+python -m src.db.vectorstore      # create the tables + HNSW index (idempotent, safe to re-run)
+python -m scripts.seed_rules      # load baseline org rules (idempotent; re-run adds only new ones)
 ```
+`docker compose up -d` only starts an empty Postgres. The second command creates the
+`vector` extension and the three tables the agent reads/writes. It is idempotent
+(`CREATE TABLE IF NOT EXISTS`), so re-running it is harmless. The third loads the baseline
+org rules the audit enforces - without it the procedural-rules table is empty and that check
+is a no-op. It dedups, so editing the rule list and re-running only inserts what's new.
+
+---
+
+## 💥 In case you have to NUKE the schema
+> **Destructive - read before running.** This permanently deletes all stored
+> audits, session episodes, and rules. Only use it when you want a clean slate
+> (e.g. after a schema change that `CREATE TABLE IF NOT EXISTS` can't apply to an
+> existing table).
+```bash
+python -m src.db.vectorstore drop # drops all tables; prompts for 'yes' first
+python -m src.db.vectorstore      # rebuild an empty schema with the latest columns
+```
+The `drop` command prints a red warning and waits for you to type `yes`;
+anything else aborts and nothing is dropped. It removes only the tables (their
+indexes go with them); the `vector` extension is left in place.
 
 ---
 

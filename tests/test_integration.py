@@ -25,7 +25,7 @@ index 83db48f..f9a2498 100644
 def test_sql_injection_pr_is_escalated():
     from src.llm_retry import QuotaExhaustedError
     config = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    initial = {"messages": [REAL_DIFF]}
+    initial = {"audit": {"messages": [REAL_DIFF]}}
 
     # Stream until the graph either finishes or pauses (interrupt_before human_review).
     # If all API keys are daily-exhausted the graph fails closed - skip rather than error,
@@ -36,7 +36,7 @@ def test_sql_injection_pr_is_escalated():
     except QuotaExhaustedError as e:
         pytest.skip(f"All Gemini keys daily-exhausted: {e}")
 
-    final = app.get_state(config).values
+    final = app.get_state(config).values.get("audit", {})
     print("\n=== FINAL STATE ===")
     print("security_score:", final.get("security_score"))
     print("security_findings:", final.get("security_findings"))

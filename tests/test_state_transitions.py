@@ -1,3 +1,7 @@
+"""Tests in this file: the compiled graph's structure (no LLM/DB).
+
+- test_graph_compiles_and_has_expected_nodes: the StateGraph builds and contains all expected nodes.
+"""
 from src.graph import builder
 
 

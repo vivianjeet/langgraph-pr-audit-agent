@@ -12,7 +12,7 @@ def run_audit(diff_text: str):
     
     print("Starting LangGraph PR Audit Agent... \n")
     initial_state = {
-        "messages" : [diff_text]
+        "audit": {"messages": [diff_text]}
     }
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
@@ -23,8 +23,16 @@ def run_audit(diff_text: str):
         for event in stream:
             for node_name, node_state in event.items():
                 print(f"--- Node Executed: {node_name} ---")
-                if node_state and node_state.get("messages"):
-                    print(node_state["messages"][-1])
+                # finalize's message is the full report; we print final_report once at the
+                # end, so skip it here to avoid printing the whole report (with its
+                # "Learned N rules" note) twice.
+                if node_name == "finalize":
+                    print()
+                    continue
+                # Node outputs are AMSState-shaped: the audit substate carries messages.
+                audit = (node_state or {}).get("audit") or {}
+                if audit.get("messages"):
+                    print(audit["messages"][-1])
                 print()
     try:
         # First pass - runs untill END or untill it pauses before human_review
@@ -33,7 +41,7 @@ def run_audit(diff_text: str):
         # If the graph paused, .next will contain the node we're interrupted before.
         snapshot = app.get_state(config)
         if snapshot.next and "human_review" in snapshot.next:
-            v = snapshot.values
+            v = snapshot.values.get("audit", {})
             print(">>> Graph PAUSED for human review (critical findings / low score).")
             print(f">>> All scores = {v.get('security_score')}    "
                     f"quality_score = {v.get('quality_score')}    "
@@ -45,11 +53,13 @@ def run_audit(diff_text: str):
             decision = input(">>> Enter decision [approve/reject/needs-changes]: ").strip() or "approve"
 
             # Inject the decision into state, then resume by streaming with None input.
-            app.update_state(config, {"human_decision": decision})
+            # Goes through the audit channel so merge_audit applies it to the substate.
+            app.update_state(config, {"audit": {"human_decision": decision}})
             print("\n>>> Resuming after human decision...")
             _drain(app.stream(None, config=config))
-        
-        print(app.get_state(config).values.get("final_report", "(no report)"))
+
+        final_audit = app.get_state(config).values.get("audit", {})
+        print(final_audit.get("final_report", "(no report)"))
     
     except QuotaExhaustedError as e:
         print(f"\n[ABORTED] {e}")

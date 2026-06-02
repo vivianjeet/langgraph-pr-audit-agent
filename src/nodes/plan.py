@@ -1,6 +1,8 @@
-from src.state import AuditState, AuditPlan, Severity
+from src.state import AuditPlan, Severity, RuleCategory
 from pydantic import BaseModel, Field
 from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.memory import AgentMemorySystem as AMS, AMSState
+from src.text_utils import clip as _clip
 
 FAST_MODEL = "gemini-2.5-flash"
 SMALL_TOKEN_COUNT = 4000
@@ -16,7 +18,7 @@ class PlanAuditOutput(BaseModel):
     )
     plan: AuditPlan
 
-def plan_audit_node(state: AuditState):
+def plan_audit_node(state: AMSState):
     """
     Look at the diff once, decide where to spend the audit effort
     """
@@ -27,13 +29,37 @@ def plan_audit_node(state: AuditState):
             files_to_prioritize=[]
         )
     
-    parsed_diff = state.get("parsed_diff","")
+    ams = AMS(state)
+    parsed_diff = ams.read("parsed_diff","")
+
     if not parsed_diff.strip():
-        return {
+        return {"audit": {
             "messages" : ["System: plan skipped - no parsed diff found in state."],
             "audit_plan": default_plan.model_dump()
-        }
-    files = state.get("files_changed",[])
+        }}
+
+    # Pull memory: semantic (similar past audits), episodic (past sessions), and procedural
+    # (org rules) were ALL recalled ONCE in the retrieve node and live in the TOP-LEVEL
+    # channels. Read them off `state` directly (ams.read is audit-scoped, won't see them);
+    # no DB re-query here. The plan uses rules to STEER triage (focus_areas/audit_depth);
+    # the audit nodes separately enforce them verbatim from the same `procedural` channel.
+    similar = state.get("semantic", []) or []
+    episodes = state.get("episodic", []) or []
+    procedural = state.get("procedural", {}) or {}
+    rules = [r for cat in RuleCategory for r in procedural.get(cat.value, [])]
+
+    precedent_block = ""
+    if similar:
+        precedent_block += "Similar past audits:\n" + "\n".join(
+            f"- {_clip(s['pr_summary'], 160)}" for s in similar) + "\n"
+    if episodes:
+        precedent_block += "Relevant past sessions:\n" + "\n".join(
+            f"- {_clip(e['summary'], 160)}" for e in episodes) + "\n"
+    if rules:
+        precedent_block += "Standing org rules to apply:\n" + "\n".join(
+            f"- {r}" for r in rules) + "\n"
+
+    files = ams.read("files_changed",[])
     system_prompt = (
         "You are the lead reviewer triaging a code change before deep audit. "
         "Given the diff and the list of changed files, produce an audit plan:\n"
@@ -45,11 +71,15 @@ def plan_audit_node(state: AuditState):
     )
     user_prompt = (
         "Changed files: {{files}}\n"
-        "Diff: {{diff}}"
+        "Diff: {{diff}}\n"
+        "{{precedent}}"
     )
     messages = [
             {"role":"system","content":system_prompt},
-            {"role":"user","content": user_prompt.replace("{{files}}", str(files)).replace("{{diff}}", parsed_diff)}
+            {"role":"user","content": user_prompt
+                .replace("{{files}}", str(files))
+                .replace("{{diff}}", parsed_diff)
+                .replace("{{precedent}}", precedent_block)}
         ]
     try:
         response: PlanAuditOutput = call_gemini(model=FAST_MODEL,messages = messages,
@@ -58,20 +88,20 @@ def plan_audit_node(state: AuditState):
     except QuotaExhaustedError:
         raise
     except Exception as e:
-        return {
+        return {"audit": {
             "messages": [f"System: plan failed after retries ({type(e).__name__}); using default plan."],
             "audit_plan": default_plan.model_dump(),
             "node_errors": [f"plan: {type(e).__name__} - {str(e)}"]
-        }
+        }}
     
     valid = set(files)
     response.plan.files_to_prioritize = [
         f for f in response.plan.files_to_prioritize if f in valid
     ]
 
-    return {
+    return {"audit": {
         "messages" : [f"System: Audit plan -> depth={response.plan.audit_depth}, "
                       f"reasoning: {response.reasoning}, "
                       f"risk={response.plan.risk_level.value}, focus={response.plan.focus_areas}"],
         "audit_plan": response.plan.model_dump()
-    }
+    }}

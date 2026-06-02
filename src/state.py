@@ -16,6 +16,17 @@ class AuditDepth(str, Enum):
     STANDARD = "standard"
     DEEP = "deep"
 
+class RuleStatus(str, Enum):
+    SEEDED = "seeded"                      # baseline rule, authored not learned
+    LEARNED_PENDING = "learned_pending"    # proposed by an audit, awaiting review
+    LEARNED_APPROVED = "learned_approved"  # promoted after human approval
+    REJECTED = "rejected"
+
+class RuleCategory(str, Enum):
+    SECURITY = "security"
+    QUALITY = "quality"
+    COVERAGE = "coverage"
+
 class _FindingBase(BaseModel):
     severity: Severity
 
@@ -92,7 +103,12 @@ class AuditState(TypedDict):
     confidence_score: float # reflection's own confidence the audit is complete
     gaps_identified: list[str] # what the first pass likely missed
 
-    similar_prs: list # retrieved precedent audits
     final_report: str # markdown report produced by finalize
 
     node_errors: Annotated[list[str], operator.add] # any errors nodes want to report but not raise (eg; audit degraded due to LLM issues, but we still want a report)
+
+# NOTE: AuditState above is the IN-CONTEXT working-memory schema (one substate). The
+# graph's full nested state - AMSState - and its `merge_audit` reducer live in
+# src/memory.py, because they are memory-system concerns: AMS owns the four-channel
+# state. This module stays the domain/schema leaf (findings, plan, AuditState) and
+# imports nothing of ours, so memory.py can import AuditState from here without a cycle.

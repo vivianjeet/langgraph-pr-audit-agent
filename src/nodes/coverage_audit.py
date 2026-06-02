@@ -1,7 +1,8 @@
 # Test-coverage auditor: flags missing/weak tests for changed code (ReAct + Instructor)
 from pydantic import BaseModel, Field
-from src.state import CoverageFinding, AuditState
+from src.state import CoverageFinding, RuleCategory
 from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.memory import AgentMemorySystem as AMS, AMSState
 
 FAST_MODEL = "gemini-2.5-flash"
 SMALL_TOKEN_COUNT = 4000
@@ -24,21 +25,28 @@ class CoverageAuditOutput(BaseModel):
         )
     )
 
-def coverage_audit_node(state: AuditState):
+def coverage_audit_node(state: AMSState):
     """Analyse the parsed PR for missing test coverage (critical for sage deployement). Plan aware"""
 
-    parsed_diff = state.get("parsed_diff", "")
-    plan = state.get("audit_plan", {})
+    ams = AMS(state)
+    parsed_diff = ams.read("parsed_diff", "")
+    plan = ams.read("audit_plan", {})
     focus = ", ".join(plan.get("focus_areas",[])) or "general review (no plan available)"
 
     if not parsed_diff.strip():
-        return {
+        return {"audit": {
             "messages": ["System: test_coverage_audit skipped - No parsed diff found in state."],
             "test_findings": [],
-        }
+        }}
+    # Procedural memory: enforce this node's DOMAIN rules (coverage) literally. Rules were
+    # recalled ONCE in retrieve and live in the `procedural` channel - read from there.
+    # "" when no coverage rules exist, so the {{rules}} placeholder collapses.
+    rules_block = AMS.rules_block(state.get("procedural", {}), (RuleCategory.COVERAGE,))
+
     system_prompt = (
         "You are a test engineer reviewing a PR for test coverage. "
         "The lead reviewer's audit plan flagged these focus areas - prioritise test coverage for them: {{focus}}\n"
+        "{{rules}}"
         "Identify code paths that changed but have NO corresponding test, focusing on: "
         "- Payment / transaction logic (must have edge-case + failure tests)\n"
         "- Authentication / authorization changes\n"
@@ -50,7 +58,9 @@ def coverage_audit_node(state: AuditState):
         "{{diff}}"
     )
     messages=[
-            {"role":"system","content":system_prompt.replace("{{focus}}",focus)},
+            {"role":"system","content":system_prompt
+                .replace("{{focus}}",focus)
+                .replace("{{rules}}", rules_block)},
             {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
         ]
     try:
@@ -60,18 +70,18 @@ def coverage_audit_node(state: AuditState):
     except QuotaExhaustedError:
         raise
     except Exception as e:
-        return {
+        return {"audit": {
             "messages": [f"System: coverage_audit failed after retries ({type(e).__name__}); no findings recorded."],
             "test_findings": [],
             "node_errors": [f"coverage_audit: {type(e).__name__} - {str(e)}"]
-        }
+        }}
 
     new_message = (
         "System: Test audit completed. \n"
         f"Reasoning: {response.reasoning}\n"
         f"Found {len(response.findings)} gaps\n"
     )
-    return {
+    return {"audit": {
         "messages": [new_message],
         "test_findings": response.findings,
-    }
+    }}

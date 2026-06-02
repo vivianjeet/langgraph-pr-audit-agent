@@ -1,3 +1,9 @@
+"""Manual smoke script (NOT a pytest module - no test_ functions).
+
+Runs a full real audit (`run_audit`) over a hardcoded vulnerable sample diff to eyeball
+the end-to-end pipeline by hand. Calls the live LLM/DB. Invoke directly, not via pytest:
+    python tests/smoke_test.py
+"""
 from main import run_audit
 
 sample_diff = """
