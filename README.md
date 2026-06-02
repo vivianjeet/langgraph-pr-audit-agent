@@ -123,6 +123,77 @@ reach a prompt.
 
 ---
 
+## 📏 Context budgeting (`TokenBudgetManager`)
+
+When you assemble a prompt from several pieces - a system prompt, the diff, retrieved precedent,
+chat history - and the total can outgrow the model's window, you need to decide *what to drop* in
+priority order rather than letting the call fail or truncate at a random byte. `TokenBudgetManager`
+(`src/token_budget.py`) does that, and **logs every trim** so nothing is ever dropped silently.
+
+It is generic by design: it imports nothing from this app (no `AuditState`, no DB). It operates on a
+plain list of labelled, prioritised text `Segment`s and a budget, and returns the segments that fit
+plus a trim log. The caller is what knows about your state - the manager just honours the priorities
+you assign.
+
+```python
+from src.token_budget import TokenBudgetManager, Segment
+
+# priority: lower number = higher priority. 0 = mandatory (never trimmed).
+segments = [
+    Segment(0, "system",     system_prompt),    # always kept
+    Segment(1, "query",      user_diff),         # the current change
+    Segment(2, "chunk:auth", retrieved_chunk),   # retrieved context, droppable
+    Segment(3, "history:0",  old_message),       # oldest history, dropped first
+]
+
+kept, trim_log = TokenBudgetManager(budget_tokens=8000).fit(segments)
+
+prompt = assemble(kept)          # build your prompt from what survived
+for line in trim_log:            # never silent: surface what was dropped and why
+    print(line)
+```
+
+**Priority convention:** `0` = system prompt (mandatory) · `1` = query / current diff · `2` =
+retrieved chunks by relevance · `3+` = history. To trim **oldest history first**, give older
+messages a higher priority number (e.g. `3 + age`) - the manager sorts by `(priority, input order)`,
+so a naive all-equal priority would trim the *newest* first, which is the wrong end.
+
+**Swapping the token counter:** the estimate is a dependency-free `len(text) // 4` heuristic - fine
+for *deciding what to drop* (it doesn't need to be exact). The `counter` parameter lets you plug in a
+real tokenizer when you want precision:
+
+```python
+TokenBudgetManager(budget_tokens=8000, counter=my_real_tokenizer)
+```
+
+### Plug-and-play: using it for very large (1M+ token) PR diffs
+
+This repo does **not** route the live audit through the budget manager, and that is deliberate: a
+single PR diff is far smaller than Gemini's ~1M-token window, so an in-band budget check here would
+always keep everything, trim nothing, and only add latency. The class and its tests are the artifact;
+it is demonstrated under synthetic oversized load in `tests/test_token_budget.py`.
+
+If you are cloning this to handle genuinely huge diffs, the budget manager is the **last** mile, not
+the whole fix. A diff larger than the model window breaks in three places, in this order:
+
+1. **Embedding (breaks first).** `retrieve` and `finalize` embed the diff for similarity search and
+   storage, and embedding models have a much smaller input limit than the chat window. You cannot fix
+   this by trimming the text before embedding - a trimmed embedding represents a *different* text than
+   the real diff, so similarity search returns wrong results. The fix is **chunked ingestion +
+   retrieval** (split the diff per file/hunk, embed each chunk, retrieve the relevant ones).
+2. **Parsing.** `parse_github_diff` (`src/nodes/ingest.py`) keeps every added/removed line, so a huge
+   diff stays huge after parsing. You need a pre-reduction step (per-file summaries or changed-hunk
+   headers).
+3. **Prompt assembly (the budget manager's job).** Once the pieces are reasonably sized, route the
+   prompt assembly in `plan.py` (and the audit nodes) through `TokenBudgetManager.fit(...)` instead of
+   concatenating the diff and precedent directly, then set `budget_tokens` to your model's real window
+   and (optionally) pass a real `counter`.
+
+In short: handling a 1M+ diff is primarily a chunking/RAG problem (steps 1-2); the budget manager
+cleanly handles the final fit (step 3) and is built to drop into that pipeline unchanged.
+
+---
+
 ## 🚀 How to Install & Start
 
 ### 1. Clone & Environment Setup
