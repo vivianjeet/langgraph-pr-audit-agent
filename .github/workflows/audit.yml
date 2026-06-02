@@ -1,0 +1,99 @@
+name: PR Audit
+
+# Runs on every pull request (and manual dispatch). Two jobs:
+#   1. tests  - hermetic suite, always runs, no secrets, free.
+#   2. gate   - the `python main.py --large` pre-merge audit gate. Opt-in: it only runs when
+#               enabled (see TOGGLE below), because it spends LLM credits and needs a DB + secret.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_gate:
+        description: "Run the --large audit gate for this manual run"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: read        # gate reads PR reviews (pr_is_human_approved)
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Job 1: tests - always runs, fast, free (no LLM, no DB).
+  # ----------------------------------------------------------------------------
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run hermetic test suite
+        run: pytest -m "not integration" -q
+
+  # ----------------------------------------------------------------------------
+  # Job 2: gate - the real pre-merge audit. python main.py --large audits the PR's diff;
+  # on escalation it exits 1 (blocking the merge) unless a human has Approved the PR.
+  #
+  # TOGGLE (edit to enable): this job runs only when EITHER
+  #   - the repo/Actions VARIABLE `RUN_AUDIT_GATE` == 'true'  (Settings > Variables), OR
+  #   - you trigger it manually with the run_gate input checked.
+  # Leave it off and only `tests` runs. Flip the variable (or set USE_LARGE below) to turn the
+  # gate on without touching job logic.
+  # ----------------------------------------------------------------------------
+  gate:
+    needs: tests
+    if: ${{ vars.RUN_AUDIT_GATE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_gate) }}
+    runs-on: ubuntu-latest
+    env:
+      # CI-local DB (matches docker-compose's pgvector). The gate reads DATABASE_URL directly.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pr_audit
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # EDIT HERE: "1" runs the gate with the --large flag (force compression); "0" runs a plain
+      # audit (compression auto-fires only). Both audit the real PR diff and gate the build.
+      USE_LARGE: "1"
+    services:
+      pgvector:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: pr_audit
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before the job's steps run.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # REQUIRED: full history so the gate can diff the PR against origin/<base>. A shallow
+          # checkout (the default) would leave origin/<base> absent and the gate would silently
+          # audit the demo fixture instead of the PR. Do not lower this.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Initialise pgvector schema
+        run: python -m src.db.vectorstore
+      - name: Seed baseline rules
+        run: python -m scripts.seed_rules
+      - name: Run audit gate
+        # GITHUB_TOKEN is injected automatically and is what pr_is_human_approved uses via gh.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "$USE_LARGE" = "1" ]; then
+            python main.py --large
+          else
+            python main.py
+          fi

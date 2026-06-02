@@ -79,14 +79,21 @@ def finalize_report_node(state: AMSState):
     top_security = _top(report["security_findings"])
     top_quality = _top(report["quality_findings"])
     top_test = _top(report["test_findings"])
-    episode = (
-        f"Files changed: {report['files_changed']}. "
-        f"security={report['security_score']} quality={report['quality_score']} "
-        f"test={report['test_score']}, decision={report['human_decision']}. "
-        f"Top security: {_fmt(top_security)}. "
-        f"Top quality: {_fmt(top_quality)}. "
-        f"Top test gaps: {_fmt(top_test)}."
-    )
+    # Prefer the compacted session history (from compress_node, `compressed` channel) as the
+    # episodic record when compression fired this run; else fall back to the structured summary.
+    # compressed is a TOP-LEVEL AMSState channel -> read off state, not via ams.read (audit substate).
+    compressed = state.get("compressed", [])
+    if compressed:
+        episode = "Compressed session history:\n" + "\n".join(str(m) for m in compressed)
+    else:
+        episode = (
+            f"Files changed: {report['files_changed']}. "
+            f"security={report['security_score']} quality={report['quality_score']} "
+            f"test={report['test_score']}, decision={report['human_decision']}. "
+            f"Top security: {_fmt(top_security)}. "
+            f"Top quality: {_fmt(top_quality)}. "
+            f"Top test gaps: {_fmt(top_test)}."
+        )
     try:
         AMS.store_episode(
             episode,

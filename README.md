@@ -34,9 +34,10 @@ graph TD
     coverage_audit --> synthesize
     synthesize -->|borderline 0.5-0.7| reflexion
     synthesize -->|critical / score<0.5| human_review
-    synthesize -->|clean| finalize
+    synthesize -->|clean| compress
     reflexion --> plan
-    human_review --> finalize
+    human_review --> compress
+    compress --> finalize
     finalize --> END
 ```
 
@@ -53,7 +54,9 @@ graph TD
 4. **Three audits run in parallel** - security (OWASP/SQLi/PII/authn), quality (smells, magic numbers, DRY/SOLID), and coverage (missing tests). All are **plan-aware** (they read `audit_plan.focus_areas`).
 5. **Synthesize** computes deterministic, severity-weighted scores ($0, no LLM) the router can act on.
 6. **Reflexion** (`gemini-2.5-pro`) - on a borderline result, a *smarter* model critiques the audit, identifies gaps, and loops back to plan for a sharper second pass (max 2 loops).
-7. **Human review / finalize** - on a CRITICAL finding or score < 0.5, the graph **pauses** at `human_review` (`interrupt_before`) for a human decision (see [Human-in-the-Loop](#-human-in-the-loop-pause--inject--resume)); otherwise it finalizes. `finalize` assembles the markdown report and persists it to pgvector as precedent.
+7. **Human review** - on a CRITICAL finding or score < 0.5, the graph **pauses** at `human_review` (`interrupt_before`) for a human decision (see [Human-in-the-Loop](#-human-in-the-loop-pause--inject--resume)); otherwise it skips straight on.
+8. **Compress** - both paths into finalize funnel through a `compress` node that compacts the oldest portion of the session history when it has grown large (or when forced); a no-op pass-through otherwise (see [History compression](#-history-compression-the-compress-node)).
+9. **Finalize** - assembles the markdown report and persists it to pgvector as precedent (and, when compression fired, stores the *compacted* history as the session episode).
 
 ### Reliability (banking-grade fail-closed)
 Every Gemini call routes through `src/llm_retry.py`, which:
@@ -79,6 +82,10 @@ cognitive split so each kind of memory has a clear job:
 | **Semantic** | Similar past PR audits (precedent) | `pr_audits` (pgvector) | cosine similarity |
 | **Episodic** | Compressed past-session summaries | `session_episodes` (pgvector) | cosine similarity |
 | **Procedural** | Org audit rules / templates, keyed by category | `procedural_rules` (Postgres) | exact category lookup |
+
+> A run also carries a transient `compressed` channel - the compacted history produced by the
+> `compress` node, which `finalize` promotes into the episodic store. See
+> [History compression](#-history-compression-the-compress-node).
 
 The persistent three share one embed + pgvector spine; procedural is a plain keyed table (a rule is
 looked up by name, not by similarity, so it needs no embedding). Embeddings are memoised per process
@@ -120,6 +127,44 @@ approves them**. This is deliberate: a rule derived from the agent's own output 
 and a single false positive would otherwise become a permanent rule injected into every future
 audit. So the agent *proposes*; a human *approves*. Only `seeded` and `learned_approved` rules ever
 reach a prompt.
+
+---
+
+## 🗜️ History compression (the `compress` node)
+
+A long-running session accumulates messages - plan, three audit results, reflexion passes, the
+human decision. Left unbounded, that history grows toward the model's context limit. The `compress`
+node folds the **oldest ~50%** of the message history into a single summary that preserves the
+signal (decisions, scores, CRITICAL/HIGH findings, file paths) and discards exploratory chatter,
+keeping the newest messages verbatim.
+
+It sits at a single choke point: **both** paths into `finalize` (the clean path and the
+post-`human_review` path) route through `compress`, so finalize always sees a consistent state. When
+compression doesn't fire, the node is a **pass-through** - it returns nothing and the graph flows on
+untouched - so a normal short audit pays nothing for it.
+
+**Two triggers (an OR gate):**
+
+| Trigger | Source | Meaning |
+|---------|--------|---------|
+| **auto** | `should_compress` at 80% of a token budget | the session genuinely approached the limit |
+| **force** | the `--large` flag, threaded into state as `force_compress` | compress regardless of size (demo / explicit) |
+
+**Where the result goes.** The working transcript (`audit.messages`) is **append-only by design** -
+its reducer protects the parallel audit fan-out from clobbering itself - so compression cannot
+overwrite it. Instead the compacted history is written to its own `compressed` channel
+(last-writer-wins). This is also conceptually correct: a compressed session *is* proto-episodic
+memory, so `finalize` stores it as the session **episode** when present (falling back to a structured
+findings summary otherwise). That closes a loop - a compressed session this run becomes precedent a
+future run can recall.
+
+**Resilience.** The summary is produced by `gemini-2.5-flash`; if the model is unavailable, a no-LLM
+fallback keeps only the signal lines (decision/plan/findings prefixes) so compression still happens
+and never loses the important content. `QuotaExhaustedError` propagates (same fail-closed rule as the
+audit nodes).
+
+> Like the budget manager below, the compression mechanism is generic - it operates on a plain list
+> of stringifiable messages and knows nothing about `AuditState`.
 
 ---
 
@@ -302,6 +347,120 @@ python main.py --demo
 
 > Because state is durable via the checkpointer, the pause can span a human coffee break
 > (or a process restart) without losing the in-flight audit.
+
+---
+
+## 🏃 Running the agent (all modes)
+
+`main.py` runs in a few modes, selected by flag:
+
+| Command | Diff audited | Compression | Human review |
+|---------|--------------|-------------|--------------|
+| `python main.py --test` | bundled SQL-injection fixture | n/a (smoke test) | n/a |
+| `python main.py --demo` | bundled SQL-injection fixture | auto only (won't fire on a small diff) | interactive prompt |
+| `python main.py --demo --large` | bundled fixture | **forced** (see it run on the fixture) | interactive prompt |
+| `python main.py --large` | **the real diff** vs the branch you're merging into | **forced** | interactive (local) / build-gate (CI) |
+| `python main.py` *(no flags)* | **the real diff** vs the branch you're merging into | auto only | interactive (local) / build-gate (CI) |
+
+- **`--test`** runs the end-to-end smoke test (one live Gemini call) and exits.
+- **`--demo`** runs the interactive audit on a known fixture - the quickest way to see the whole
+  pipeline, including the human-in-the-loop pause. Add **`--large`** to force the compression pass so
+  you can watch the `compress` node fire even though the fixture is small.
+- **`--large`** (and the no-flag run) are the **real pre-merge gate**: they audit your actual changes
+  against the branch you intend to merge into. `--large` additionally *forces* compression; the
+  no-flag run lets compression auto-decide. See the gate section below.
+
+### The pre-merge gate (`--large` on a real diff)
+
+When you run `--large` (or no flags) outside the demo, the agent audits the diff between your branch
+and its merge target - the same changes a reviewer would see in the PR.
+
+**Locally**, two things are required:
+
+1. **You are prompted for the target branch.** The gate asks
+   `Merge into which branch? [main]:` - press Enter for `main` or type another branch. The diff
+   audited is `git diff origin/<that-branch>...HEAD`. Before auditing, the gate also runs a
+   **read-only merge-compatibility check** (`git merge-tree`) and aborts if the branches conflict -
+   there is no point auditing a diff that can't even merge.
+2. **You must be logged into the GitHub CLI.** Run `gh auth login` first. The gate reuses `gh`'s
+   stored credential to read PR state - **no separate token is needed locally**. (If `gh` isn't
+   logged in, the GitHub-dependent steps can't authenticate.)
+
+```bash
+gh auth login          # one-time, if not already done
+python main.py --large # prompts for the target branch, then audits your changes
+```
+
+If no real diff is found against the chosen branch, the gate falls back to the bundled fixture (with
+a printed warning) so the run still demonstrates the pipeline.
+
+---
+
+## ⚙️ Continuous Integration (audit on every PR)
+
+The repo ships a GitHub Actions workflow (`.github/workflows/audit.yml`) with **two jobs**:
+
+| Job | Runs | Cost | Needs |
+|-----|------|------|-------|
+| **`tests`** | every PR | free | nothing - just `pytest -m "not integration"` |
+| **`gate`** | opt-in (see toggle) | LLM spend | a Postgres service + `GEMINI_API_KEY` secret |
+
+### How the human gate works in CI
+
+There is no terminal in CI, so the interactive prompt is replaced by an **exit-code gate**:
+
+1. On a PR, the `gate` job runs `python main.py --large` against the PR's diff (base branch comes
+   from `GITHUB_BASE_REF` automatically - no prompt).
+2. If the audit **escalates** to human review (a CRITICAL finding or score < 0.5) and **no human has
+   approved the PR yet**, the job **exits 1** - the required check fails and the merge is blocked.
+3. A reviewer clicks **Approve** in the GitHub PR UI. GitHub re-triggers the workflow; this time the
+   gate reads the PR's review state (via `gh`, authenticated by the auto-injected `GITHUB_TOKEN`),
+   sees the approval, and **exits 0** - the merge is unblocked.
+
+So the "human in the loop" is the PR reviewer acting asynchronously in GitHub, and the pause lives in
+GitHub's state, not a blocked process. Interactive `input()` HITL stays a local-only experience.
+
+### What to configure in GitHub (one-time)
+
+Everything lives under *Settings → Secrets and variables → Actions*.
+
+**Secrets** (the *Secrets* tab):
+
+| Secret | Required | Purpose |
+|--------|----------|---------|
+| `GEMINI_API_KEY` | **Yes** (for the `gate` job) | the audit's Gemini calls |
+| `GEMINI_API_KEY2`, `GEMINI_API_KEY3`, `GEMINI_API_KEY4` | Optional | extra keys the resilience layer rotates to on quota exhaustion. The default workflow forwards only `GEMINI_API_KEY`; add a line per extra key in the `gate` job's `env:` if you want CI rotation too. |
+| `GITHUB_TOKEN` | **No - auto-injected** | GitHub Actions provides it for free; the gate uses it (via `gh`) to read the PR's approval state. You do not create this. |
+
+> `DATABASE_URL` is **not** a secret in CI - the workflow points it at the job's own pgvector
+> service container, so there is nothing to set.
+
+**Variables** (the *Variables* tab):
+
+| Variable | Set to | Purpose |
+|----------|--------|---------|
+| `RUN_AUDIT_GATE` | `true` | turns the `gate` job on (it is **off by default**, so a fresh fork only runs the free `tests` job) |
+
+### Tuning the gate (edit the YAML)
+
+- **Force vs. auto compression in CI:** edit one line in the `gate` job's `env:`
+  ```yaml
+  env:
+    USE_LARGE: "1"   # "1" = run `python main.py --large` (force compression)
+                     # "0" = run `python main.py`        (compression auto-fires only)
+  ```
+- **Manual run instead of the variable:** trigger the workflow from the Actions tab
+  (`workflow_dispatch`) with the `run_gate` input checked.
+- **Block merges for real:** make the `gate` job a **required status check** in branch protection -
+  otherwise a failing gate is advisory.
+
+> **No `.env` needed for CI.** CI reads `GEMINI_API_KEY` from the secret and `DATABASE_URL` from the
+> workflow - it never loads `.env`. Locally, your existing `.env` (`DATABASE_URL` + `GEMINI_API_KEY`)
+> is unchanged by the gate; the only extra local prerequisite is a one-time `gh auth login`.
+
+> **One hard requirement:** the gate's checkout uses `fetch-depth: 0`. This is mandatory - a shallow
+> checkout would leave `origin/<base>` absent, so `git diff origin/<base>...HEAD` would return empty
+> and the gate would silently audit the fixture instead of the PR. Do not lower it.
 
 ---
 

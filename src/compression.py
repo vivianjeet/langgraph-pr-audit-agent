@@ -8,20 +8,22 @@ from src.llm_retry import call_gemini, QuotaExhaustedError
 # Shared source of truth (defined in state.py) so this can't drift from reflexion's
 # critique set; superset = reflexion's prefixes + post-synthesis decisions.
 from src.state import COMPRESSION_SIGNAL_PREFIXES as COMPRESSION_SIGNAL_PREFIXES
+from src.token_budget import estimate_tokens   # shared counter: trigger + budget agree
 
 FAST_MODEL = "gemini-2.5-flash"
 SUMMARY_TOKENS = 1024
+DEMO_BUDGET = 10000
 
 def should_compress(messages: list, count_fn, budget: int, threshold: float = 0.8) -> bool:
     """True when current message tokens reach `threshold` (default 80%) of `budget`.
-    This is the TRIGGER - the curriculum's '80% context threshold'."""
+    This is the TRIGGER - the 80% context threshold."""
     used = sum(count_fn(str(m)) for m in messages)
     return used >= threshold * budget
 
 
 def compress_history(messages: list, compress_ratio: float = 0.5, min_keep: int = 2) -> list:
     """
-    Compress the OLDEST `compress_ratio` of the message list (curriculum: 'oldest 50%') into
+    Compress the OLDEST `compress_ratio` of the message list (default: oldest 50%) into
     ONE summary message, keeping the newest portion verbatim. Returns [summary, *recent].
 
     `compress_ratio=0.5` collapses the oldest half; `min_keep` guarantees at least that many
@@ -62,3 +64,32 @@ def compress_history(messages: list, compress_ratio: float = 0.5, min_keep: int 
         summary_text = "Compressed (no-LLM fallback). Kept signal:\n" + "\n".join(kept)
 
     return [f"System: [compressed {len(old)} earlier messages] {summary_text}", *recent]
+
+def run_compression_pass(messages: list, force: bool = False,
+                         budget: int = DEMO_BUDGET) -> tuple[dict, str]:
+    """Live compression pass over a finished session's messages.
+
+    Fires when EITHER `force` is set (the --large flag) OR should_compress says we've
+    hit 80% of `budget` on real usage. Returns (state_update, report):
+      - state_update: {"compressed": [...]} for the AMSState `compressed` channel
+                      (empty dict {} when nothing fired - nothing to write),
+      - report: a printable summary of what happened (path taken, token before/after).
+    Read-only w.r.t. the audit transcript; only ever writes the `compressed` channel.
+    """
+    used = sum(estimate_tokens(str(m)) for m in messages)
+    auto = should_compress(messages, estimate_tokens, budget, threshold=0.8)
+    if not (force or auto):
+        pct = (used / budget * 100) if budget else 0
+        return {}, (f"[compression] not triggered - {used} tok = {pct:.0f}% of {budget} "
+                    f"(< 80% threshold, and --large not set). History left intact.")
+
+    path = "AUTO (>=80% of budget)" if auto else "--large (forced below threshold)"
+    compacted = compress_history(messages, compress_ratio=0.5)
+    after = sum(estimate_tokens(str(m)) for m in compacted)
+    report = (
+        f"[compression] FIRED via {path}.\n"
+        f"  messages: {len(messages)} -> {len(compacted)}   "
+        f"tokens(est): {used} -> {after}   budget: {budget}\n"
+        f"  written to the `compressed` channel (proto-episodic; audit transcript untouched)."
+    )
+    return {"compressed": compacted}, report

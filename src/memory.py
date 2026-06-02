@@ -3,6 +3,7 @@
 #   semantic    -> AMSState["semantic"] + pgvector precedent (similar past PR audits)
 #   episodic    -> AMSState["episodic"] + pgvector (compressed past-session summaries)
 #   procedural  -> AMSState["procedural"] + pgvector (keyed org rules / templates)
+#   compressed  -> AMSState["compressed"] compacted session history
 #
 # AMS is STATEFUL: construct one per node as `ams = AMS(state)` wrapping the AMSState
 # LangGraph just handed in. It lives/dies within a single node call (no stale snapshot).
@@ -51,11 +52,15 @@ class AMSState(TypedDict):
                    rules are never re-queried per node (same recall-once pattern as the
                    semantic/episodic channels).
     The three memory channels are last-writer-wins: one node populates each per run.
+    - compressed : compacted session history written by compress_node (proto-episodic).
+    - force_compress : entry flag (from --large) that forces compression regardless of size.
     """
     audit: Annotated[AuditState, merge_audit]
     semantic: list
     episodic: list
     procedural: dict
+    compressed: list
+    force_compress: bool        # set once at entry from the --large flag; read by compress_node
 
 
 class AgentMemorySystem:

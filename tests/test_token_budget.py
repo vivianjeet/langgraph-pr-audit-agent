@@ -34,7 +34,7 @@ def test_mandatory_kept_even_if_over_budget():
 
 def test_synthetic_long_session_trims_oldest_history_first():
     # The 'demo on synthetic load' case: many history segments, only the NEWEST fit.
-    # Encode age into priority so OLDEST is trimmed first (curriculum: 'history oldest first').
+    # Encode age into priority so OLDEST is trimmed first (history oldest first).
     # history:0 is the OLDEST -> highest priority number (3+19) -> dropped first;
     # history:19 is the NEWEST -> lowest history priority (3+0) -> kept if room.
     segs = [Segment(0, "system", "s"*40), Segment(1, "query", "q"*40)]

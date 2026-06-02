@@ -11,6 +11,7 @@ from src.nodes.plan import plan_audit_node
 from src.nodes.reflexion import reflexion_node
 from src.nodes.retrieve import retrieve_context_node
 from src.nodes.finalize import finalize_report_node
+from src.nodes.compress import compress_node
 from src.state import Severity
 
 #=================================================================
@@ -99,6 +100,7 @@ builder.add_node("coverage_audit", coverage_audit_node)
 builder.add_node("synthesize", synthesize_report_node)
 builder.add_node("reflexion", reflexion_node)
 builder.add_node("human_review", human_review_node)
+builder.add_node("compress", compress_node)
 builder.add_node("finalize", finalize_report_node)
 
 # Linear flow at the start
@@ -123,15 +125,17 @@ builder.add_conditional_edges(
     {
         "reflect":"reflexion",
         "human_review":"human_review",
-        "finalize":"finalize"
+        "finalize":"compress"        # go through compress before finalize
     }
 )
 
 # If we reflect, we go back to plan stage
 builder.add_edge("reflexion","plan")
 
-# FInalize the workflow
-builder.add_edge("human_review","finalize")
+# Both finalize paths (clean audit + post human review) funnel through compress, so finalize
+# always sees a fresh `compressed` channel (compress is a pass-through when not triggered).
+builder.add_edge("human_review","compress")
+builder.add_edge("compress","finalize")
 builder.add_edge("finalize",END)
 
 #=================================================================
@@ -139,10 +143,21 @@ builder.add_edge("finalize",END)
 #=================================================================
 
 # We use memory saver to give the graph "threads" (checkpointing).
-# Allow-list src.state so the checkpointer can (de)serialize our own domain types
-# (Severity, *Finding, AuditDepth, etc.) without the "unregistered type" warning that
-# a future LangGraph will turn into a hard block.
-serde = JsonPlusSerializer(allowed_msgpack_modules=["src.state"])
+# Allow-list our own domain types so the checkpointer can (de)serialize them on resume
+# (Severity, *Finding, AuditDepth, etc.). langgraph-checkpoint >=4 requires explicit
+# (module, qualname) tuples - a bare "src.state" module string is silently ignored and the
+# types come back as plain dicts (then `finding.severity` blows up on the human-review resume).
+# DERIVE the list from src.state's own enum/model classes so adding a type can't drift it.
+import enum as _enum, inspect as _inspect
+from pydantic import BaseModel as _BaseModel
+import src.state as _state
+_ALLOWED_STATE_TYPES = [
+    (_state.__name__, name)
+    for name, obj in vars(_state).items()
+    if _inspect.isclass(obj) and obj.__module__ == _state.__name__
+    and issubclass(obj, (_enum.Enum, _BaseModel))
+]
+serde = JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED_STATE_TYPES)
 memory = MemorySaver(serde=serde)
 
 # interrupt_before acts as hard stop for human approval

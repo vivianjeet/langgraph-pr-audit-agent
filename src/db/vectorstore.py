@@ -42,7 +42,7 @@ def _embed_cached(text: str) -> tuple[float, ...]:
     by one caller and corrupt another's hit.
 
     Why this matters: within ONE audit run the SAME diff is embedded by both the
-    retrieve node (similarity query) and the finalize node (storage) - and Day 16's
+    retrieve node (similarity query) and the finalize node (storage) - and the
     episodic recall embeds it again. Those are separate AMS instances (AMS is
     per-node), so the dedupe has to live HERE, at the embedding layer, not on AMS.
     """
