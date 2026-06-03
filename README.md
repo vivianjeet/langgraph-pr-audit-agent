@@ -110,6 +110,17 @@ cognitive split so each kind of memory has a clear job:
 > `compress` node, which `finalize` promotes into the episodic store. See
 > [History compression](#history-compression-the-compress-node).
 
+**Persistent locally, ephemeral in CI.** The three persistent memory types live in Postgres, so how
+much the agent "remembers" depends on where it runs:
+
+- **Locally** the Docker pgvector container holds its data across runs, so semantic and episodic
+  recall accumulate - the agent genuinely learns from past audits over time.
+- **In GitHub Actions** the [pre-merge gate](#continuous-integration-audit-on-every-pr) spins up a
+  fresh pgvector **service container per run**, which is torn down when the job ends. So a CI audit
+  starts from an empty store with no prior records - recall simply finds nothing and the audit
+  degrades gracefully (it never depends on history). This is deliberate: the gate audits *this* PR's
+  diff, and a clean, reproducible per-run database is the right tradeoff for CI over a persistent one.
+
 The persistent three share one embed + pgvector spine. Procedural rules are *retrieved* by exact
 category lookup (not similarity), but each rule is **also embedded** - not for retrieval, but so the
 review tool can flag near-duplicate proposed rules by cosine similarity (see

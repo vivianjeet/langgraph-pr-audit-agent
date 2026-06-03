@@ -103,8 +103,11 @@ jobs:
         run: python -m scripts.seed_rules
       - name: Run audit gate
         # GITHUB_TOKEN is injected automatically and is what pr_is_human_approved uses via gh.
+        # PR_NUMBER is passed explicitly because the CI checkout is a detached merge ref - `gh pr
+        # view` can't infer the PR from the branch, so the approval lookup needs the number.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           if [ "$USE_LARGE" = "1" ]; then
             python main.py --large
