@@ -1,3 +1,20 @@
+"""Tests in this file: the LLM retry / API-key-rotation layer (src/llm_retry.py).
+
+Retry-delay parsing:
+- test_retry_delay_parses_structured     : delay read from a structured error field.
+- test_retry_delay_parses_message        : delay parsed from the error message text.
+
+Quota classification:
+- test_is_daily_quota_true_on_perday      : per-day quota error classified as daily.
+- test_is_daily_quota_false_on_perminute  : per-minute quota error is NOT daily.
+- test_rotation_then_quota_exhausted      : keys rotate, then QuotaExhaustedError when all spent.
+
+Blocked-key detection + rotation:
+- test_is_key_blocked_detects_403_service_blocked : 403 service-blocked is a blocked key.
+- test_is_key_blocked_detects_permission_denied   : permission-denied is a blocked key.
+- test_is_key_blocked_false_on_503                : 503 is transient, NOT a blocked key.
+- test_blocked_key_rotates_then_exhausts          : blocked keys rotate, then exhaust.
+"""
 from unittest.mock import patch
 import pytest
 import src.llm_retry as r

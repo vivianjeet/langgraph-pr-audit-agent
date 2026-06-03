@@ -1,8 +1,9 @@
 # Checks the security of the code changes. Uses a ReAct pattern so the
 # LLM reasons step by step before it reports findings.
 from pydantic import BaseModel, Field
-from src.state import SecurityFinding, AuditState
-from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.state import SecurityFinding, RuleCategory
+from src.llm_retry import call_gemini_async, QuotaExhaustedError
+from src.memory import AgentMemorySystem as AMS, AMSState
 
 FAST_MODEL = "gemini-2.5-flash"
 SMALL_TOKEN_COUNT = 4000
@@ -20,27 +21,34 @@ class SecurityAuditOutput(BaseModel):
         description= "List of identified security vulnerabilities. Emppty if none found"
     )
 
-def security_audit_node(state: AuditState):
+async def security_audit_node(state: AMSState):
     """
     Analyses the parsed PR for security vulnerabilities using the ReAct pattern.
     Validates output via instructor to enforce compliance with the SecurityFinding schema.
     Plan Aware
     """
 
+    ams = AMS(state)
     # Get the parsed diff from the ingest node (should be the last message)
-    parsed_diff = state.get("parsed_diff","")
-    plan = state.get("audit_plan",{})
+    parsed_diff = ams.read("parsed_diff","")
+    plan = ams.read("audit_plan",{})
     focus = ", ".join(plan.get("focus_areas",[])) or "general review (no plan available)"
-    
+
     if not parsed_diff.strip():
-        return {
+        return {"audit": {
             "messages": ["System: security_audit skipped - No parsed diff found in state."],
             "security_findings": [],
-        }
+        }}
+
+    # Procedural memory: enforce this node's DOMAIN rules LITERALLY. Rules were recalled
+    # ONCE in the retrieve node and live in the `procedural` channel - read them from there
+    # (no re-query). security/quality/coverage pull their own.
+    rules_block = AMS.rules_block(state.get("procedural", {}), (RuleCategory.SECURITY,))
 
     system_prompt = (
         "You are a senior security engineer conducting a PR audit. "
         "The lead reviewer's audit plan flagged these focus areas - prioritise them: {{focus}}\n"
+        "{{rules}}"
         "Analyse the following code changes for security vulnerabilities, specifically "
         "focussing on: \n"
         "- OWASP Top 10 \n"
@@ -55,21 +63,23 @@ def security_audit_node(state: AuditState):
         "{{diff}}"
     )
     messages = [
-        {"role": "system", "content": system_prompt.replace("{{focus}}",focus)},
+        {"role": "system", "content": system_prompt
+            .replace("{{focus}}", focus)
+            .replace("{{rules}}", rules_block)},
         {"role": "user", "content": user_prompt.replace("{{diff}}",parsed_diff)},
     ]
     try:
-        response = call_gemini(model=FAST_MODEL,messages=messages,
+        response = await call_gemini_async(model=FAST_MODEL,messages=messages,
                                response_model=SecurityAuditOutput,
                                max_output_tokens=SMALL_TOKEN_COUNT)
     except QuotaExhaustedError:
         raise
     except Exception as e:
-        return {
+        return {"audit": {
             "messages": [f"System: security_audit failed after retries ({type(e).__name__}); no findings recorded."],
             "security_findings": [],
             "node_errors": [f"security_audit: {type(e).__name__} - {str(e)}"]
-        }
+        }}
 
     #Format a system message summary
     new_message = (
@@ -78,7 +88,7 @@ def security_audit_node(state: AuditState):
         f"Found {len(response.findings)} issues\n"
     )
 
-    return {
+    return {"audit": {
         "messages" : [new_message],
         "security_findings": response.findings
-    }
+    }}

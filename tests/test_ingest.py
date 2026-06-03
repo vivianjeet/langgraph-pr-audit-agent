@@ -1,3 +1,8 @@
+"""Tests in this file: the INGEST node + its diff parser (pure, no LLM/DB).
+
+- test_parse_githuib_diff_extracts_correct_lines: parse_github_diff pulls the right added/changed lines.
+- test_ingest_pr_node_state_update              : ingest_pr_node writes parsed_diff/files_changed to state.
+"""
 from src.nodes.ingest import parse_github_diff, ingest_pr_node
 
 sample_diff = """
@@ -24,12 +29,12 @@ def test_parse_githuib_diff_extracts_correct_lines():
 
 def test_ingest_pr_node_state_update():
     mock_diff = """diff --git a/test.py b/test.py\n--- a/test.py\n+++ b/test.py\n+print('Hello Context')"""
-    mock_state = {"messages": [mock_diff], 
-                  "parsed_diff": "", 
+    mock_state = {"audit": {"messages": [mock_diff],
+                  "parsed_diff": "",
                   "files_changed": ["payment_gateway.py"]
-                  }
+                  }}
 
-    result = ingest_pr_node(mock_state)
+    result = ingest_pr_node(mock_state)["audit"]
 
     assert "messages" in result
     assert len(result["messages"]) == 1

@@ -1,3 +1,23 @@
+"""Tests in this file: the conditional-edge ROUTING predicates (pure functions, no LLM/DB).
+
+Reflexion gate:
+- test_reflect_on_borderline_score      : borderline scores trigger a reflexion loop.
+- test_reflect_triggers_on_any_dimension: any one low dimension triggers reflexion.
+- test_no_reflect_outside_band          : scores outside the band do NOT reflect.
+- test_reflect_on_auth_silence          : auth-touching diff with no findings reflects (suspicious silence).
+- test_reflect_capped_after_two_loops   : reflexion is capped (no infinite loop).
+
+Human-review gate:
+- test_human_review_on_any_low_score    : any low score escalates to human review.
+- test_human_review_on_critical_finding : a critical finding escalates to human review.
+- test_no_human_review_when_clean       : a clean run skips human review.
+
+End-to-end routing decisions:
+- test_route_clean_finalizes            : clean -> finalize.
+- test_route_borderline_reflects        : borderline -> reflect.
+- test_route_low_score_to_human         : low score -> human.
+- test_route_critical_outranks_reflect  : critical finding outranks the reflect path.
+"""
 import pytest
 
 from src.graph import should_reflect, needs_human_review, route_after_synthesis
@@ -13,6 +33,7 @@ def _sec(sev: Severity) -> SecurityFinding:
 def _make_state(**overrides) -> dict:
     """
     Clean baseline; each test overrides only what it excercises (keep tests readable).
+    Predicates read the audit substate, so the baseline is wrapped under `audit`.
     """
     base = {
         "security_score": 1.0,
@@ -25,7 +46,7 @@ def _make_state(**overrides) -> dict:
         "iteration_count": 0
     }
     base.update(overrides)
-    return base
+    return {"audit": base}
 
 # --------------- should_reflect ---------------------
 @pytest.mark.parametrize("score", [0.5, 0.6, 0.7])

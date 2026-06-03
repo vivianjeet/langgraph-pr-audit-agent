@@ -1,67 +1,132 @@
 
 import argparse
+import sys
 import uuid
 from src.graph import app
 from src.llm_retry import QuotaExhaustedError
 from src.state import Severity
+import asyncio
 
-def run_audit(diff_text: str):
-    """Runs the end to end graph execution on the provided diff
-    If it pauses for human review, prompt for a decision and resume.
+async def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
+    """Runs the end to end graph execution on the provided diff.
+
+    Local (ci=False): if it pauses for human review, PROMPT for a decision and resume.
+    CI (ci=True): there is no stdin, so DON'T prompt - if it paused before human_review, report
+    and return escalated=True so the caller can gate the build (exit code); never resume here.
+
+    Returns True if the audit escalated to human review (CI path), else False.
     """
-    
+
     print("Starting LangGraph PR Audit Agent... \n")
     initial_state = {
-        "messages" : [diff_text]
+        "audit": {"messages": [diff_text]},
+        "force_compress": large,            # read by compress_node inside the graph
     }
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
     
     print("Running graph...\n")
 
-    def _drain(stream):
-        for event in stream:
+    async def _drain(stream):
+       async  for event in stream:
             for node_name, node_state in event.items():
                 print(f"--- Node Executed: {node_name} ---")
-                if node_state and node_state.get("messages"):
-                    print(node_state["messages"][-1])
+                # finalize's message is the full report; we print final_report once at the
+                # end, so skip it here to avoid printing the whole report (with its
+                # "Learned N rules" note) twice.
+                if node_name == "finalize":
+                    print()
+                    continue
+                # Node outputs are AMSState-shaped: the audit substate carries messages.
+                audit = (node_state or {}).get("audit") or {}
+                if audit.get("messages"):
+                    print(audit["messages"][-1])
                 print()
     try:
         # First pass - runs untill END or untill it pauses before human_review
-        _drain(app.stream(initial_state, config=config))
+        await _drain(app.astream(initial_state, config=config))
 
         # If the graph paused, .next will contain the node we're interrupted before.
-        snapshot = app.get_state(config)
+        snapshot = await app.aget_state(config)
         if snapshot.next and "human_review" in snapshot.next:
-            v = snapshot.values
+            v = snapshot.values.get("audit", {})
             print(">>> Graph PAUSED for human review (critical findings / low score).")
             print(f">>> All scores = {v.get('security_score')}    "
                     f"quality_score = {v.get('quality_score')}    "
                     f"test_score = {v.get('test_score')}")
+            # Findings may come back as Pydantic objects OR (if a checkpoint round-trip degraded
+            # them) plain dicts - read either shape so the resume path can't crash on .severity.
+            def _fld(f, name, default=None):
+                return f.get(name, default) if isinstance(f, dict) else getattr(f, name, default)
             criticals = [f for bucket in ("security_findings", "quality_findings", "test_findings")
-                         for f in v.get(bucket, []) if f.severity == Severity.CRITICAL]
+                         for f in v.get(bucket, [])
+                         if str(_fld(f, "severity")) in (Severity.CRITICAL, Severity.CRITICAL.value)]
             for f in criticals:
-                print(f">>>    CRITICAL {f.file_path}:{getattr(f, 'line_number', '?')} - {f.description}")
+                print(f">>>    CRITICAL {_fld(f,'file_path')}:{_fld(f,'line_number','?')} - {_fld(f,'description')}")
+
+            if ci:
+                # No stdin in CI - don't prompt, don't resume. Report and hand the gate decision
+                # back to the caller (it checks the PR's approval state and sets the exit code).
+                print(">>> CI: escalated to human review. Caller will gate the build.")
+                return True
+
             decision = input(">>> Enter decision [approve/reject/needs-changes]: ").strip() or "approve"
 
             # Inject the decision into state, then resume by streaming with None input.
-            app.update_state(config, {"human_decision": decision})
+            # Goes through the audit channel so merge_audit applies it to the substate.
+            await app.aupdate_state(config, {"audit": {"human_decision": decision}})
             print("\n>>> Resuming after human decision...")
-            _drain(app.stream(None, config=config))
-        
-        print(app.get_state(config).values.get("final_report", "(no report)"))
-    
+            await _drain(app.astream(None, config=config))
+
+        final_audit = (await app.aget_state(config)).values.get("audit", {})
+        print(final_audit.get("final_report", "(no report)"))
+        return False   # ran to completion without (unresolved) escalation
+
     except QuotaExhaustedError as e:
         print(f"\n[ABORTED] {e}")
         print("  All keys exhausted. Re-run after the daily reset (midnight PT) or enable API billing.")
-        return   # NO report emitted, by design
-        
+        return False   # NO report emitted, by design
+
+
+async def run_gate(large: bool):
+    """The --large pre-merge gate. Audits the REAL diff (changes vs the branch being merged into)
+    and forces compression. Two surfaces:
+      - LOCAL: ask the base branch, verify it merges cleanly (abort on conflict), audit, report.
+      - CI: base from env, no prompt; if the audit escalates to human review, pass only when a
+        human has already Approved the PR (GitHub holds that state) - else exit 1 to block merge.
+    """
+    from scripts.git_gate import (
+        in_ci, resolve_base, merge_is_clean, resolve_diff, pr_is_human_approved,
+    )
+    ci = in_ci()
+    base = resolve_base(ci)
+
+    if not ci:
+        ok, why = merge_is_clean(base, ci)
+        print(f">>> Merge-compatibility vs '{base}': {why}")
+        if not ok:
+            print(">>> Resolve conflicts before auditing. Aborting.")
+            sys.exit(1)
+
+    diff = resolve_diff(demo=False, base=base)
+    escalated = await run_audit(diff, large=large, ci=ci)
+
+    if ci:
+        if escalated and not pr_is_human_approved():
+            print("::error::Audit escalated to human review and no APPROVED review found. Blocking merge.")
+            sys.exit(1)
+        sys.exit(0)
+
 
 def main():
     parser = argparse.ArgumentParser(description="LangGraph PR Audit Agent")
     parser.add_argument("--test", action="store_true", help="Run the end-to-end smoke test")
     parser.add_argument("--demo", action="store_true", help=("Run the demo - "
             "Interactive human-in-the-loop audit on the SQL-injection diff"))
+    parser.add_argument("--large", action="store_true",
+                    help=("Force the context-compression pass over the session "
+                          "messages even when below the 80%% budget threshold. Without it, "
+                          "compression still AUTO-fires if a session genuinely hits 80%%."))
     args = parser.parse_args()
 
     if args.test:
@@ -70,10 +135,15 @@ def main():
         run_smoke_test()
     elif args.demo:
         from tests.test_integration import REAL_DIFF
-        run_audit(REAL_DIFF)
+        asyncio.run(run_audit(REAL_DIFF, args.large))
+    elif args.large:
+        # --large = the real pre-merge gate: audit the real diff, force compression, and in CI
+        # gate the build on findings vs the PR's human-approval state.
+        asyncio.run(run_gate(large=True))
     else:
-        print("LangGraph PR Audit Agent is ready.")
-        print("Run 'python main.py --test' to execute the smoke test.")
+        # No flags = normal audit on the real diff via the same gate, compression NOT forced
+        # (auto-fires only if the session hits 80% of budget).
+        asyncio.run(run_gate(large=False))
 
 if __name__ == "__main__":
     main()

@@ -6,9 +6,14 @@ import instructor
 from google import genai
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+import asyncio   # add to imports
+import threading 
 
 load_dotenv()
 log = logging.getLogger(__name__)
+
+# guards _key_idx + client rebinding under concurrent fan-out
+_rotate_lock = threading.Lock()
 
 # --- API key pool (primary + optional fallbacks) ---
 _KEYS = [k for k in (
@@ -34,17 +39,6 @@ class QuotaExhaustedError(Exception):
 
 def current_key():
     return _KEYS[_key_idx]
-
-def _rotate_key():
-    """
-    Advance to the next key. Returns True if a new key is not active, Flase is none left
-    """
-    global _key_idx
-    if _key_idx + 1 < len(_KEYS):
-        _key_idx += 1
-        log.warning("Rotating to backup Gemini API key #%d", _key_idx + 1)
-        return True
-    return False
 
 # --- clients (rebuilt when the key rotates) ---
 def _build_clients():
@@ -120,6 +114,23 @@ def _log_before_sleep(retry_state):
         attempt, reason, wait, str(exc)[:120],
     )
 
+def _rotate_from(failed_idx: int) -> bool:
+    """Rotate off the key the caller just saw fail. Double-checked under the lock: if another
+    thread already advanced past `failed_idx` (concurrent fan-out hitting the same dead key),
+    this thread does NOT rotate again - it returns True so the caller retries on the now-current
+    key. Returns False only when failed_idx is the LAST key and it's still current (pool exhausted).
+    """
+    global _key_idx
+    with _rotate_lock:
+        if _key_idx != failed_idx:
+            return True                      # someone already rotated us off the dead key; ride along
+        if _key_idx + 1 < len(_KEYS):
+            _key_idx += 1
+            log.warning("Rotating to backup Gemini API key #%d", _key_idx + 1)
+            _refresh_clients()               # rebind clients INSIDE the lock - no torn client/key pair
+            return True
+        return False                         # this was the last key and it's still current → exhausted
+
 llm_retry = retry(
     stop=stop_after_attempt(5),
     wait=_wait_server_then_backoff,
@@ -129,19 +140,23 @@ llm_retry = retry(
 )
 
 def _run_with_rotation(fn):
-    """Run fn() with the current key. On a PER-DAY quota error, rotate to the next key
-    and retry the SAME request; raise QuotaExhaustedError only when every key is exhausted.
+    """Run fn() with the current key. On a PER-DAY quota error, rotate 
+    (thread-safe, double-checked) to the next key and retry the SAME request; 
+    raise QuotaExhaustedError only when every key is exhausted.
     Per-minute 429s are handled inside fn() by the @llm_retry wait (no rotation)."""
     while True:
+        idx = _key_idx                       # the key this attempt is using
         try:
             return fn()
         except Exception as e:
             if _is_daily_quota(e) or _is_key_blocked(e):
-                if _rotate_key():
-                    _refresh_clients()
-                    continue                 # retry same request on the new key
+                if _rotate_from(idx):        # rotate only if nobody else already did
+                    continue                 # retry on the (possibly already-rotated) current key                # retry same request on the new key
                 raise QuotaExhaustedError(
-                    "All Gemini API keys are daily-exhausted or key-blocked - aborting audit to avoid a false-clean score."
+                    """
+                    All Gemini API keys are daily-exhausted or key-blocked - 
+                    aborting audit to avoid a false-clean score.
+                    """
                 ) from e
             raise                            # non-quota errors: already retried by @llm_retry, propagate
 
@@ -172,3 +187,12 @@ def call_embed(model, contents, output_dim):
     """Shared embedding call: same per-minute retry + per-day key-rotation + fail-closed.
     Different API shape than chat (raw genai, not instructor), so it's a separate wrapper."""
     return _run_with_rotation(lambda: _raw_embed(model, contents, output_dim))
+
+async def call_gemini_async(model, messages, response_model, max_output_tokens):
+    """Async wrapper over the sync call_gemini: runs the blocking instructor call on a worker
+    thread so several audit nodes can overlap their Gemini I/O via asyncio. Reuses the FULL
+    sync stack (per-minute retry + per-day key-rotation + fail-closed) unchanged - we only move
+    the blocking call off the event loop, we do NOT reimplement rotation against an async client."""
+    return await asyncio.to_thread(
+        call_gemini, model, messages, response_model, max_output_tokens
+    )

@@ -4,7 +4,9 @@ langchain-core==1.4.0
 
 # LLM + structured output
 google-genai==2.7.0
-instructor==1.15.1
+# The [google-genai] extra pulls instructor's deps for that backend (e.g. jsonref) - bare
+# `instructor` omits them, which silently breaks structured output on a clean install.
+instructor[google-genai]==1.15.1
 
 # Vector store
 pgvector==0.4.2

@@ -1,4 +1,5 @@
-from src.state import AuditState, Severity
+from src.state import Severity
+from src.memory import AgentMemorySystem as AMS, AMSState
 
 
 _SEVERITY_PENALTY = {
@@ -20,11 +21,12 @@ def _weighted_score(findings) -> float:
     penalty = sum(_SEVERITY_PENALTY.get(f.severity,0.0) for f in findings)
     return max(0.0, round(1.0 - penalty, 2))
 
-def synthesize_report_node(state: AuditState):
+def synthesize_report_node(state: AMSState):
     """ Aggregate the three audits into a single risk score the router can act on"""
-    sec = state.get("security_findings",[])
-    qual = state.get("quality_findings",[])
-    test = state.get("test_findings",[])
+    ams = AMS(state)
+    sec = ams.read("security_findings",[])
+    qual = ams.read("quality_findings",[])
+    test = ams.read("test_findings",[])
 
     sec_score = _weighted_score(sec)
     qual_score = _weighted_score(qual)
@@ -32,7 +34,7 @@ def synthesize_report_node(state: AuditState):
 
     # FAIL CLOSED: if an AUDIT node errored out (not just plan), it returned empty
     # findings -> a 1.0 here would be a FALSE clean. Force max risk so routing escalates.
-    errors = state.get("node_errors", [])
+    errors = ams.read("node_errors", [])
     audit_errors = [e for e in errors if e.split(":")[0] in
                     ("security_audit", "quality_audit", "coverage_audit")]
     if audit_errors:
@@ -49,9 +51,9 @@ def synthesize_report_node(state: AuditState):
     if audit_errors:
         summary += f"\n⚠ FAIL-CLOSED: audit node(s) errored, scores forced to 0.0: {audit_errors}"
     
-    return {
+    return {"audit": {
         "messages" : [summary],
         "security_score": sec_score,
         "quality_score": qual_score,
         "test_score": test_score,
-    }
+    }}

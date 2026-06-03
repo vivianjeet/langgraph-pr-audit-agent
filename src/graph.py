@@ -1,6 +1,7 @@
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from src.state import AuditState
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from src.memory import AgentMemorySystem as AMS, AMSState
 from src.nodes.ingest import ingest_pr_node
 from src.nodes.security_audit import security_audit_node
 from src.nodes.quality_audit import quality_audit_node
@@ -10,14 +11,15 @@ from src.nodes.plan import plan_audit_node
 from src.nodes.reflexion import reflexion_node
 from src.nodes.retrieve import retrieve_context_node
 from src.nodes.finalize import finalize_report_node
+from src.nodes.compress import compress_node
 from src.state import Severity
 
 #=================================================================
 # Node Stubs
 #=================================================================
 
-def human_review_node(state: AuditState):
-    return {"messages" : ["System: Human Approved Report"]}
+def human_review_node(state: AMSState):
+    return {}
 
 
 #=================================================================
@@ -29,7 +31,7 @@ REFLECT_LO, REFLECT_HI = 0.5, 0.7
 MAX_REFLECTIONS = 2
 SCORE_KEYS = ("security_score", "quality_score", "test_score")
 
-def should_reflect(state: AuditState) -> bool:
+def should_reflect(state: AMSState) -> bool:
     """
     Decides if the AI needs to critique its own work or move forward
     Reflect (self-critique then re-audit) when the result is uncertain:
@@ -38,36 +40,38 @@ def should_reflect(state: AuditState) -> bool:
     Hard cap: never reflect more than twice (iteration_count guard).
     """
 
-    if state.get("iteration_count",0) >= MAX_REFLECTIONS:
+    ams = AMS(state)
+    if ams.read("iteration_count",0) >= MAX_REFLECTIONS:
         return False
-    
+
     # Borderline on any dimension -> worth a sharper second pass
     for key in SCORE_KEYS:
-        if REFLECT_LO <= state.get(key,1.0) <= REFLECT_HI:
+        if REFLECT_LO <= ams.read(key,1.0) <= REFLECT_HI:
             return True
-    
-    # Suspicious silence: auth-related change but no security findings -> reflect to see 
+
+    # Suspicious silence: auth-related change but no security findings -> reflect to see
     # if we missed something
-    files = state.get("files_changed",[])
+    files = ams.read("files_changed",[])
     touched_auth = any(any(h in f.lower() for h in AUTH_HINTS) for f in files)
-    if touched_auth and len(state.get("security_findings",[])) == 0:
+    if touched_auth and len(ams.read("security_findings",[])) == 0:
         return True
     return False
 
-def needs_human_review(state: AuditState) -> bool:
+def needs_human_review(state: AMSState) -> bool:
     """
     Escalate to a human on any CRITICAL finding, or a low score (<0.5).
     """
-    if any(state.get(key,1.0) < 0.5 for key in SCORE_KEYS):
+    ams = AMS(state)
+    if any(ams.read(key,1.0) < 0.5 for key in SCORE_KEYS):
         return True
     all_findings = (
-        state.get("security_findings",[])
-        + state.get("quality_findings",[])
-        + state.get("test_findings",[])
+        ams.read("security_findings",[])
+        + ams.read("quality_findings",[])
+        + ams.read("test_findings",[])
     )
     return any(f.severity == Severity.CRITICAL for f in all_findings)
 
-def route_after_synthesis(state: AuditState) -> str:
+def route_after_synthesis(state: AMSState) -> str:
     """
     Combine the two predicates into one routing decision LangGraph can map to modes
     Decide whether to reflect or continue to human review after seeing the synthesized 
@@ -84,7 +88,7 @@ def route_after_synthesis(state: AuditState) -> str:
 # Wiring the graph toloplogy
 #=================================================================
 
-builder = StateGraph(AuditState)
+builder = StateGraph(AMSState)
 
 # Add all nodes to the graph
 builder.add_node("ingest", ingest_pr_node)
@@ -96,6 +100,7 @@ builder.add_node("coverage_audit", coverage_audit_node)
 builder.add_node("synthesize", synthesize_report_node)
 builder.add_node("reflexion", reflexion_node)
 builder.add_node("human_review", human_review_node)
+builder.add_node("compress", compress_node)
 builder.add_node("finalize", finalize_report_node)
 
 # Linear flow at the start
@@ -120,23 +125,40 @@ builder.add_conditional_edges(
     {
         "reflect":"reflexion",
         "human_review":"human_review",
-        "finalize":"finalize"
+        "finalize":"compress"        # go through compress before finalize
     }
 )
 
 # If we reflect, we go back to plan stage
 builder.add_edge("reflexion","plan")
 
-# FInalize the workflow
-builder.add_edge("human_review","finalize")
+# Both finalize paths (clean audit + post human review) funnel through compress, so finalize
+# always sees a fresh `compressed` channel (compress is a pass-through when not triggered).
+builder.add_edge("human_review","compress")
+builder.add_edge("compress","finalize")
 builder.add_edge("finalize",END)
 
 #=================================================================
 # Compile the graph
 #=================================================================
 
-# We use memory saver to give the graph "threads" (checkpointing)
-memory = MemorySaver()
+# We use memory saver to give the graph "threads" (checkpointing).
+# Allow-list our own domain types so the checkpointer can (de)serialize them on resume
+# (Severity, *Finding, AuditDepth, etc.). langgraph-checkpoint >=4 requires explicit
+# (module, qualname) tuples - a bare "src.state" module string is silently ignored and the
+# types come back as plain dicts (then `finding.severity` blows up on the human-review resume).
+# DERIVE the list from src.state's own enum/model classes so adding a type can't drift it.
+import enum as _enum, inspect as _inspect
+from pydantic import BaseModel as _BaseModel
+import src.state as _state
+_ALLOWED_STATE_TYPES = [
+    (_state.__name__, name)
+    for name, obj in vars(_state).items()
+    if _inspect.isclass(obj) and obj.__module__ == _state.__name__
+    and issubclass(obj, (_enum.Enum, _BaseModel))
+]
+serde = JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED_STATE_TYPES)
+memory = MemorySaver(serde=serde)
 
 # interrupt_before acts as hard stop for human approval
 app = builder.compile(checkpointer=memory, interrupt_before=["human_review"])

@@ -1,3 +1,13 @@
+"""Tests in this file: the vectorstore embedding helpers (Gemini API mocked).
+
+- test_embed_batch_empty_returns_empty          : [] in -> [] out, no API call.
+- test_embed_batch_preserves_count_and_dim      : one vector per input, correct dimension.
+- test_embed_batch_splits_into_groups           : large corpus is chunked into EMBED_BATCH groups.
+- test_embed_batch_raises_on_count_mismatch     : a count mismatch from the API raises.
+- test_store_pr_audit_embeds_embed_text_not_summary: storage embeds embed_text, not the summary label.
+- test_embed_memoises_same_text_one_api_call    : repeated text hits the cache (one API call).
+- test_embed_returns_fresh_list_so_callers_can_mutate: embed() returns a fresh list each call.
+"""
 from unittest.mock import MagicMock, patch
 import src.db.vectorstore as vs
 import src.llm_retry as llm_retry
@@ -48,3 +58,23 @@ def test_store_pr_audit_embeds_embed_text_not_summary():
          patch.object(vs, "get_conn", return_value=MagicMock()):
         vs.store_pr_audit("THE SUMMARY", {"k": 1}, embed_text="THE DIFF")
     m_embed.assert_called_once_with("THE DIFF")     # embedded the diff, not the summary
+
+
+def test_embed_memoises_same_text_one_api_call():
+    # The same text embedded twice (e.g. retrieve THEN finalize on one diff) must hit
+    # the cache: only ONE underlying API call, identical vectors returned.
+    with patch.object(llm_retry, "_raw_embed", return_value=_fake_resp(1)) as m:
+        v1 = vs.embed("identical diff")
+        v2 = vs.embed("identical diff")
+    assert v1 == v2
+    m.assert_called_once()                          # second call served from cache
+
+
+def test_embed_returns_fresh_list_so_callers_can_mutate():
+    # Cache holds an immutable tuple; embed() hands back a NEW list each time, so a
+    # caller mutating its result can't corrupt a later cache hit.
+    with patch.object(llm_retry, "_raw_embed", return_value=_fake_resp(1)):
+        a = vs.embed("x")
+        a.append(999.0)            # mutate the returned list
+        b = vs.embed("x")          # cache hit
+    assert 999.0 not in b          # the cache was not corrupted
