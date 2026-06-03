@@ -32,6 +32,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Run hermetic test suite
+        # The suite mocks every LLM call, so it never needs a real key - but src/llm_retry.py
+        # checks for one at import. This dummy satisfies that check; it is never used to call out.
+        env:
+          GEMINI_API_KEY: "ci-dummy-tests-mock-all-llm-calls"
         run: pytest -m "not integration" -q
 
   # ----------------------------------------------------------------------------
@@ -49,9 +53,19 @@ jobs:
     if: ${{ vars.RUN_AUDIT_GATE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_gate) }}
     runs-on: ubuntu-latest
     env:
-      # CI-local DB (matches docker-compose's pgvector). The gate reads DATABASE_URL directly.
+      # CI-local DB. NOTE: this is the CI pgvector service's creds (postgres:postgres), NOT your
+      # local .env's DATABASE_URL (audit:audit@localhost) - do not copy that one into a secret.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/pr_audit
+      # Real keys live in repo Secrets. Add GEMINI_API_KEY2/3/4 lines too if you set those secrets
+      # and want key rotation in CI.
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      # LangSmith tracing is opt-in via env vars (no app code). Set these and the gate's run is
+      # traced to your LangSmith project; leave them out and the audit runs identically, untraced.
+      # Only the API key is a secret; the rest are plain (not sensitive).
+      LANGCHAIN_TRACING_V2: "true"
+      LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
+      LANGCHAIN_PROJECT: "langgraph-pr-audit-agent"
+      LANGCHAIN_ENDPOINT: "https://api.smith.langchain.com"
       # EDIT HERE: "1" runs the gate with the --large flag (force compression); "0" runs a plain
       # audit (compression auto-fires only). Both audit the real PR diff and gate the build.
       USE_LARGE: "1"

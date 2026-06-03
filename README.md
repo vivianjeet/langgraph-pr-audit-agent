@@ -511,16 +511,24 @@ GitHub's state, not a blocked process. Interactive `input()` HITL stays a local-
 
 Everything lives under *Settings → Secrets and variables → Actions*.
 
-**Secrets** (the *Secrets* tab):
+**Secrets** (the *Secrets* tab - sensitive values only):
 
 | Secret | Required | Purpose |
 |--------|----------|---------|
 | `GEMINI_API_KEY` | **Yes** (for the `gate` job) | the audit's Gemini calls |
 | `GEMINI_API_KEY2`, `GEMINI_API_KEY3`, `GEMINI_API_KEY4` | Optional | extra keys the resilience layer rotates to on quota exhaustion. The default workflow forwards only `GEMINI_API_KEY`; add a line per extra key in the `gate` job's `env:` if you want CI rotation too. |
+| `LANGCHAIN_API_KEY` | Optional | enables LangSmith tracing of the gate's run. Only needed if you want CI traces; the audit runs identically without it. |
 | `GITHUB_TOKEN` | **No - auto-injected** | GitHub Actions provides it for free; the gate uses it (via `gh`) to read the PR's approval state. You do not create this. |
 
-> `DATABASE_URL` is **not** a secret in CI - the workflow points it at the job's own pgvector
-> service container, so there is nothing to set.
+The non-sensitive LangSmith settings (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_PROJECT`, `LANGCHAIN_ENDPOINT`)
+are **not** secrets - they are plain values already in the `gate` job's `env:`. Tracing switches on only
+when `LANGCHAIN_API_KEY` is also present.
+
+> **Do not copy your local `.env` wholesale into Secrets.** `DATABASE_URL` and the `POSTGRES_*`
+> values are local-only: in CI the gate talks to its own pgvector **service container**
+> (`postgres:postgres@localhost`, set in the workflow), not your machine's `audit:audit` database.
+> Adding your local `DATABASE_URL` as a secret would point CI at a database that does not exist there.
+> Only the API keys above belong in Secrets.
 
 **Variables** (the *Variables* tab):
 
