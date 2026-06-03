@@ -20,7 +20,8 @@ class RuleStatus(str, Enum):
     SEEDED = "seeded"                      # baseline rule, authored not learned
     LEARNED_PENDING = "learned_pending"    # proposed by an audit, awaiting review
     LEARNED_APPROVED = "learned_approved"  # promoted after human approval
-    REJECTED = "rejected"
+    REJECTED = "rejected"                  # human rejected a pending rule; kept (not re-learned)
+    RETIRED = "retired"                    # deactivated an active rule; kept (un-learn-safe)
 
 class RuleCategory(str, Enum):
     SECURITY = "security"

@@ -2,7 +2,7 @@
 # Same ReAct pattern as the security node, so the LLM reasons before it reports.
 from pydantic import BaseModel, Field
 from src.state import QualityFinding, RuleCategory
-from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
 
 FAST_MODEL = "gemini-2.5-flash"
@@ -24,7 +24,7 @@ class QualityAuditOutput(BaseModel):
         description= "List of identified quality issues. Empty if none found."
     )
 
-def quality_audit_node(state: AMSState):
+async def quality_audit_node(state: AMSState):
     """
     Analyses the parsed PR for code quality issues using the ReAct pattern.
     Validates output via instructor to enforce compliance with the QualityFinding schema.
@@ -69,7 +69,7 @@ def quality_audit_node(state: AMSState):
             {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
         ]
     try:
-        response = call_gemini(model=FAST_MODEL, messages=messages,
+        response = await call_gemini_async(model=FAST_MODEL, messages=messages,
                                response_model=QualityAuditOutput,
                                max_output_tokens=SMALL_TOKEN_COUNT)
     except QuotaExhaustedError:

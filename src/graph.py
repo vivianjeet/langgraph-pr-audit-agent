@@ -19,7 +19,7 @@ from src.state import Severity
 #=================================================================
 
 def human_review_node(state: AMSState):
-    return {"audit": {"messages": ["System: Human Approved Report"]}}
+    return {}
 
 
 #=================================================================

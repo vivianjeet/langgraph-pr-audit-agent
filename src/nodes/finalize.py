@@ -113,6 +113,7 @@ def finalize_report_node(state: AMSState):
     try:
         learned = AMS.learn_rules_from_findings(
             security=top_security, quality=top_quality, coverage=top_test,
+            human_decision=report["human_decision"],
         )
         if learned:
             markdown += f"\n\n_(Learned {learned} new org rule(s) from this audit.)_"

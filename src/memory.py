@@ -110,11 +110,41 @@ class AgentMemorySystem:
     def add_rule(category: RuleCategory, rule: str, status: RuleStatus) -> None:
         vs.add_rule(category, rule, status)
 
+        # ---- 4b. Procedural rule governance (offline review CLI) ----
+    @staticmethod
+    def pending_rules() -> list[dict]:
+        return vs.list_pending_rules()
+
+    @staticmethod
+    def active_rules() -> list[dict]:
+        return vs.list_active_rules()
+
+    @staticmethod
+    def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
+        return vs.similar_rules(rule_id, k=k)
+
+    @staticmethod
+    def approve_rule(rule_id: int) -> None:
+        vs.set_rule_status(rule_id, RuleStatus.LEARNED_APPROVED)
+
+    @staticmethod
+    def reject_rule(rule_id: int) -> None:
+        vs.set_rule_status(rule_id, RuleStatus.REJECTED)    # keep the row -> not re-learned
+
+    @staticmethod
+    def retire_rule(rule_id: int) -> None:
+        vs.set_rule_status(rule_id, RuleStatus.RETIRED)     # deactivate active rule, keep row
+
+    @staticmethod
+    def delete_rule(rule_id: int) -> None:
+        vs.delete_rule(rule_id)                             # hard remove
+
     # Severities important enough to become a standing rule (skip low/info/medium noise).
     _LEARNABLE_SEVERITIES = {"critical", "high"}
 
     @staticmethod
-    def learn_rules_from_findings(security=None, quality=None, coverage=None) -> int:
+    def learn_rules_from_findings(security=None, quality=None, coverage=None,
+                                  human_decision=None) -> int:
         """Promote THIS run's strongest findings into standing procedural rules so future
         audits enforce them. GUARD-RAILED to avoid rule bloat / a self-reinforcing loop:
           - only CRITICAL/HIGH findings qualify (skip low-signal nits),
@@ -122,6 +152,9 @@ class AgentMemorySystem:
             test->coverage),
           - deduped against rules ALREADY stored for that category (case-insensitive), so
             re-auditing the same PR does not keep re-inserting the same rule.
+        `human_decision` (this PR's verdict) is stored on each learned rule as provenance so a
+        reviewer sees whether a pending rule came from an approved or rejected audit. It does
+        NOT gate learning - the human decides at review time, informed by this context.
         Best-effort: any per-rule DB error is swallowed. Returns the count actually added.
         """
         buckets = ((RuleCategory.SECURITY, security), 
@@ -141,7 +174,8 @@ class AgentMemorySystem:
                 if not rule or rule.lower() in existing:
                     continue
                 try:
-                    vs.add_rule(category, rule, status=RuleStatus.LEARNED_PENDING)
+                    vs.add_rule(category, rule, status=RuleStatus.LEARNED_PENDING,
+                                source_decision=human_decision)
                 except Exception:
                     continue
                 existing.add(rule.lower())   # dedup within this run too

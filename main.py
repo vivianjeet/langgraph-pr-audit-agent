@@ -5,8 +5,9 @@ import uuid
 from src.graph import app
 from src.llm_retry import QuotaExhaustedError
 from src.state import Severity
+import asyncio
 
-def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
+async def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
     """Runs the end to end graph execution on the provided diff.
 
     Local (ci=False): if it pauses for human review, PROMPT for a decision and resume.
@@ -26,8 +27,8 @@ def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
     
     print("Running graph...\n")
 
-    def _drain(stream):
-        for event in stream:
+    async def _drain(stream):
+       async  for event in stream:
             for node_name, node_state in event.items():
                 print(f"--- Node Executed: {node_name} ---")
                 # finalize's message is the full report; we print final_report once at the
@@ -43,10 +44,10 @@ def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
                 print()
     try:
         # First pass - runs untill END or untill it pauses before human_review
-        _drain(app.stream(initial_state, config=config))
+        await _drain(app.astream(initial_state, config=config))
 
         # If the graph paused, .next will contain the node we're interrupted before.
-        snapshot = app.get_state(config)
+        snapshot = await app.aget_state(config)
         if snapshot.next and "human_review" in snapshot.next:
             v = snapshot.values.get("audit", {})
             print(">>> Graph PAUSED for human review (critical findings / low score).")
@@ -73,11 +74,11 @@ def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
 
             # Inject the decision into state, then resume by streaming with None input.
             # Goes through the audit channel so merge_audit applies it to the substate.
-            app.update_state(config, {"audit": {"human_decision": decision}})
+            await app.aupdate_state(config, {"audit": {"human_decision": decision}})
             print("\n>>> Resuming after human decision...")
-            _drain(app.stream(None, config=config))
+            await _drain(app.astream(None, config=config))
 
-        final_audit = app.get_state(config).values.get("audit", {})
+        final_audit = (await app.aget_state(config)).values.get("audit", {})
         print(final_audit.get("final_report", "(no report)"))
         return False   # ran to completion without (unresolved) escalation
 
@@ -87,7 +88,7 @@ def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
         return False   # NO report emitted, by design
 
 
-def run_gate(large: bool):
+async def run_gate(large: bool):
     """The --large pre-merge gate. Audits the REAL diff (changes vs the branch being merged into)
     and forces compression. Two surfaces:
       - LOCAL: ask the base branch, verify it merges cleanly (abort on conflict), audit, report.
@@ -134,15 +135,15 @@ def main():
         run_smoke_test()
     elif args.demo:
         from tests.test_integration import REAL_DIFF
-        run_audit(REAL_DIFF, args.large)
+        asyncio.run(run_audit(REAL_DIFF, args.large))
     elif args.large:
         # --large = the real pre-merge gate: audit the real diff, force compression, and in CI
         # gate the build on findings vs the PR's human-approval state.
-        run_gate(large=True)
+        asyncio.run(run_gate(large=True))
     else:
         # No flags = normal audit on the real diff via the same gate, compression NOT forced
         # (auto-fires only if the session hits 80% of budget).
-        run_gate(large=False)
+        asyncio.run(run_gate(large=False))
 
 if __name__ == "__main__":
     main()

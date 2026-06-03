@@ -1,7 +1,7 @@
 # Test-coverage auditor: flags missing/weak tests for changed code (ReAct + Instructor)
 from pydantic import BaseModel, Field
 from src.state import CoverageFinding, RuleCategory
-from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
 
 FAST_MODEL = "gemini-2.5-flash"
@@ -25,7 +25,7 @@ class CoverageAuditOutput(BaseModel):
         )
     )
 
-def coverage_audit_node(state: AMSState):
+async def coverage_audit_node(state: AMSState):
     """Analyse the parsed PR for missing test coverage (critical for sage deployement). Plan aware"""
 
     ams = AMS(state)
@@ -64,7 +64,7 @@ def coverage_audit_node(state: AMSState):
             {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
         ]
     try:
-        response = call_gemini(model=FAST_MODEL, messages = messages,
+        response = await call_gemini_async(model=FAST_MODEL, messages=messages,
                                response_model=CoverageAuditOutput,
                                max_output_tokens=SMALL_TOKEN_COUNT)
     except QuotaExhaustedError:

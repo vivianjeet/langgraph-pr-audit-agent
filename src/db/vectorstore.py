@@ -151,7 +151,7 @@ def init_schema():
         )
 
         # Procedural memory: org rules / audit templates, 
-        # fetched by category (no embedding needed).
+        # fetched by category
         cur.execute(
             f"""
             CREATE TABLE IF NOT EXISTS procedural_rules (
@@ -161,6 +161,8 @@ def init_schema():
                 content      TEXT NOT NULL,
                 status       TEXT NOT NULL
                     CHECK (status IN ({_RULE_STATUS_VALUES})),
+                embedding    VECTOR({EMBED_DIM}) NOT NULL,
+                source_decision TEXT,
                 created_at   TIMESTAMPTZ DEFAULT now(),
                 updated_at   TIMESTAMPTZ DEFAULT now()
             );
@@ -176,6 +178,13 @@ def init_schema():
             """
             CREATE UNIQUE INDEX procedural_rules_content_uniq
             ON procedural_rules (category, lower(content))
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS procedural_rules_embedding_hnsw
+            ON procedural_rules USING hnsw (embedding vector_cosine_ops)
+            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
             """
         )
         conn.commit()
@@ -263,15 +272,24 @@ def retrieve_episodes(query_text: str, k: int = 3) -> list[dict]:
         ]
 
 # --- Procedural memory (org rules / templates) ---
-def add_rule(category: RuleCategory, rule: str, status: RuleStatus) -> None:
+def add_rule(category: RuleCategory, rule: str, status: RuleStatus,
+             source_decision: str | None = None) -> None:
     """
-    Store an organisational audit rule under a category (security or quality or coverage).
-    pii : personal identity information
+    Store an organisational audit rule under a category (security/quality/coverage).
+    The content is embedded so the review CLI can flag near-duplicate pending rules
+    by cosine similarity (exact-text dedup can't catch reworded LLM phrasings).
+
+    `source_decision` records the human's verdict on the PR this rule was learned from
+    (approve/reject/needs-changes), so a reviewer sees a pending rule's provenance. None
+    for seeded rules (no source audit) and for runs where no human review fired.
     """
+    vec = embed(rule)
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO procedural_rules (category, content, status) VALUES (%s, %s, %s);",
-            (category.value, rule, status.value),
+            """INSERT INTO procedural_rules (category, content, status, embedding, source_decision)
+            VALUES (%s, %s, %s, %s, %s);
+            """,
+            (category.value, rule, status.value, vec, source_decision),
         )
         conn.commit()
 
@@ -297,6 +315,83 @@ def get_all_rule_contents(category: RuleCategory) -> list[str]:
             (category.value,),
         )
         return [r[0] for r in cur.fetchall()]
+
+# --- Procedural rule governance (offline review CLI) ---
+def list_pending_rules() -> list[dict]:
+    """All rules awaiting human review (learned_pending). Returns id (needed to target
+    approve/reject), category, content, and source_decision (the PR verdict it was learned
+    from). Ordered by id so the CLI lists them stably."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, category, content, source_decision FROM procedural_rules "
+            "WHERE status = %s ORDER BY id;",
+            (RuleStatus.LEARNED_PENDING.value,),
+        )
+        return [{"id": r[0], "category": r[1], "content": r[2], "source_decision": r[3]}
+                for r in cur.fetchall()]
+
+
+def list_active_rules() -> list[dict]:
+    """Active rules (seeded + learned_approved) so the CLI can offer 
+    retire/delete on them."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"SELECT id, category, status, content FROM procedural_rules "
+            f"WHERE status IN ({_ACTIVE_RULE_STATUSES}) ORDER BY id;"
+        )
+        return [{"id": r[0], "category": r[1], "status": r[2], "content": r[3]}
+                for r in cur.fetchall()]
+
+
+def set_rule_status(rule_id: int, status: RuleStatus) -> None:
+    """Transition a rule by id (approve -> learned_approved, reject -> rejected,
+    retire -> retired). Bumps updated_at so the row's last-touched time is honest."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE procedural_rules SET status = %s, updated_at = now() WHERE id = %s;",
+            (status.value, rule_id),
+        )
+        conn.commit()
+
+
+def delete_rule(rule_id: int) -> None:
+    """Hard delete - removes the row entirely. Footgun for learned rules (they re-learn
+    as pending next run because get_all_rule_contents no longer sees them); safe for seeded."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM procedural_rules WHERE id = %s;", (rule_id,))
+        conn.commit()
+
+
+def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
+    """For the review CLI's near-duplicate hint: given a pending rule's id, return up to k
+    OTHER rules (any status, excluding the rule itself) most similar by cosine over the
+    stored embedding. Reuses the pending rule's already-stored vector - no re-embed.
+
+    ADVISORY ONLY. The SIM_THRESHOLD cutoff is unvalidated: it can miss reworded duplicates
+    (false negative) or surface distinct-but-related rules (false positive). Tuning it properly
+    needs a labeled dataset of dup/not-dup rule pairs, which is RAG-evaluation work deferred to
+    Repo 2 (RAGAS). The CLI never acts on this score - the human approval gate is the real dedup,
+    so a wrong threshold only costs a human a second glance, never a wrong deletion."""
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH};")
+        cur.execute(
+            """
+            SELECT id, status, content,
+                   1 - (embedding <=> (SELECT embedding FROM procedural_rules WHERE id = %s)) AS similarity
+            FROM procedural_rules
+            WHERE id != %s
+            ORDER BY embedding <=> (SELECT embedding FROM procedural_rules WHERE id = %s)
+            LIMIT %s;
+            """,
+            (rule_id, rule_id, rule_id, k),
+        )
+        rows = cur.fetchall()
+    return [
+        {"id": r[0], "status": r[1], "content": r[2], "similarity": float(r[3])}
+        for r in rows
+        if float(r[3]) > SIM_THRESHOLD
+    ]
+
     
 # ----- DANGER !! MURDER THE DB ---------------
 def drop_schema() -> None:
