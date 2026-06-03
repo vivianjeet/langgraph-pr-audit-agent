@@ -5,6 +5,7 @@ the end-to-end pipeline by hand. Calls the live LLM/DB. Invoke directly, not via
     python tests/smoke_test.py
 """
 from main import run_audit
+import asyncio
 
 sample_diff = """
 diff --git a/auth/login.py b/auth/login.py
@@ -29,7 +30,7 @@ def run_smoke_test():
     print("   Initiating Smoke test   \n")
     print("=============================================\n")
 
-    run_audit(sample_diff)
+    asyncio.run(run_audit(sample_diff))
     
     print("=============================================\n")
     print("   Smoke test complete   \n")

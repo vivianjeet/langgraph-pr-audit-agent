@@ -109,7 +109,7 @@ async def run_gate(large: bool):
             sys.exit(1)
 
     diff = resolve_diff(demo=False, base=base)
-    escalated = run_audit(diff, large=large, ci=ci)
+    escalated = await run_audit(diff, large=large, ci=ci)
 
     if ci:
         if escalated and not pr_is_human_approved():
