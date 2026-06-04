@@ -443,8 +443,47 @@ The audit nodes are `async`, so the graph is driven through LangGraph's async AP
    (`None` = "no new input, keep going"). The graph runs `human_review → finalize`, and the
    decision is stamped onto the final report.
 
-> Because state is durable via the checkpointer, the pause can span a human coffee break
-> (or a process restart) without losing the in-flight audit.
+> Because the run is frozen in a checkpointer keyed on `thread_id`, the pause can span a human
+> coffee break without losing the in-flight audit. By default that checkpoint lives in memory, so it
+> survives within the process but not a restart; run with `--durable` to persist it to SQLite and
+> resume across restarts (see [Checkpointing](#checkpointing-in-ram-by-default-durable-on-demand)).
+
+### Checkpointing: in-RAM by default, durable on demand
+
+The checkpointer is the component that freezes a thread's state at the human-review interrupt. It is
+**pluggable** - the graph topology and the `interrupt_before` pause are identical regardless of where
+the thread is stored; only durability changes:
+
+| Mode | Checkpointer | Threads survive a process restart? | Use |
+|------|-------------|-----------------------------------|-----|
+| default | `MemorySaver` (in-RAM) | No | one-shot runs, CI gating (CI never resumes - it gates on the exit code) |
+| `--durable` | `AsyncSqliteSaver` (SQLite file) | Yes | a human review that spans a restart; resume a paused thread later |
+
+```python
+# src/graph.py - one builder, two ways to compile it
+app = build_app(MemorySaver(serde=serde))      # default, compiled at import
+
+@asynccontextmanager
+async def durable_app(db_path="checkpoints.sqlite"):
+    async with AsyncSqliteSaver.from_conn_string(db_path) as saver:
+        saver.serde = serde                     # same allow-listed serde -> domain types round-trip
+        yield build_app(saver)
+```
+
+It has to be the *async* saver, not the sync one. The audit nodes are `async`, so the graph is
+driven by `app.astream` / `aget_state`, and those call the async checkpoint methods. `AsyncSqliteSaver`
+(the `aio` variant) implements them; the plain `SqliteSaver` raises under the async driver - a trap
+worth knowing before you reach for the obvious import. The SQLite dependency is imported inside
+`durable_app`, not at module top, so the default in-RAM path never needs the optional package.
+
+Both backends share one serializer. They use the same `JsonPlusSerializer`, whose msgpack allow-list
+is derived from the enums and models in `src/state.py`. That is what makes `Severity` and the
+`*Finding` models survive a SQLite round-trip as real objects rather than degraded dicts - the same
+serde bug I hit earlier with the in-RAM saver would otherwise come straight back on the durable path.
+
+```bash
+python main.py --demo --durable      # interactive audit; thread persisted to checkpoints.sqlite
+```
 
 ---
 
@@ -467,6 +506,9 @@ The audit nodes are `async`, so the graph is driven through LangGraph's async AP
 - **`--large`** (and the no-flag run) are the **real pre-merge gate**: they audit your actual changes
   against the branch you intend to merge into. `--large` additionally *forces* compression; the
   no-flag run lets compression auto-decide. See the gate section below.
+- **`--durable`** (combinable with any run mode) persists the run's thread to a SQLite file so a
+  human-review pause can resume across a process restart instead of living only in memory. See
+  [Checkpointing](#checkpointing-in-ram-by-default-durable-on-demand).
 
 ### The pre-merge gate (`--large` on a real diff)
 
