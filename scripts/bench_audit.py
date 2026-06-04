@@ -1,9 +1,9 @@
 """Benchmark full-audit end-to-end latency over N runs on a fixed diff.
 
-Establishes a latency baseline so later cost/caching work (LiteLLM + prompt caching) can show a
-before/after improvement. It MEASURES wall-clock only; it does not optimize. Token usage is read
-from the LangSmith trace per run (each Gemini call logs prompt/completion tokens) - this script
-does not thread token counts through call_gemini (that's a later, LiteLLM-standardized change).
+Records a wall-clock latency baseline for the full audit pipeline. It MEASURES only; it does not
+optimize. Token usage is read from the LangSmith trace per run (each Gemini call logs
+prompt/completion tokens) rather than threaded through call_gemini, so the benchmark stays a thin
+wrapper around a real run.
 
 The audit nodes are async, so the graph is driven via app.astream wrapped in asyncio.run (the sync
 app.stream raises "No synchronous function provided" once nodes are async).

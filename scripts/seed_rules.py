@@ -1,5 +1,5 @@
-"""Seed baseline (human-authored) procedural rules so the procedural-memory feature is
-demonstrable from a fresh DB. These are SEEDED rules (org policy), so they are active
+"""Seed baseline (human-authored) procedural rules so the procedural-memory store has org
+policy active from a fresh DB. These are SEEDED rules (org policy), so they are active
 immediately - distinct from the learned_pending rules the agent proposes during audits.
 
 IDEMPOTENT: safe to re-run. It dedups against rules ALREADY stored for each category
