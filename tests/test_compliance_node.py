@@ -1,5 +1,4 @@
-# tests/test_compliance_node.py - the compliance node with MCP tools + the triage 
-# LLM mocked.
+# tests/test_compliance_node.py - the compliance node with the MCP tools and the triage LLM mocked.
 from unittest.mock import patch, AsyncMock
 import asyncio
 import src.nodes.compliance as comp
@@ -22,8 +21,7 @@ def test_unregulated_diff_does_no_lookup():
          patch.object(comp, "load_mcp_tools", AsyncMock()) as load:
         out = asyncio.run(comp.compliance_node(_state("diff --git a/readme.md b/readme.md\n+typo")))
     assert out["audit"]["compliance_context"] == []
-    load.assert_not_called()                    # we never even start the 
-                                                # servers for a clean diff
+    load.assert_not_called()                    # never start the servers for a clean diff
 
 
 def test_regulated_diff_runs_search_tool():

@@ -1,11 +1,8 @@
-# src/nodes/compliance.py - pull regulatory context for the PR via MCP tools, 
-# ReAct-style.
-# This is the agent acting as an MCP CLIENT. Sits between retrieve and plan: 
-# precedent (retrieve)
-# and regulatory context (here) both land before the plan triages.
-# Fail-closed: no tools / tool error / not-regulated -> empty context + a 
-# visible message,
-# never a crash and never a silent "looks clean".
+# src/nodes/compliance.py - pull regulatory context for the PR via MCP tools.
+# The agent acts as an MCP client here. The node sits between retrieve and plan, so
+# precedent (retrieve) and regulatory context (here) both land before the plan triages.
+# Fail-closed: no tools, a tool error, or an unregulated diff all give empty context plus
+# a visible message. Never a crash, never a silent "looks clean".
 from pydantic import BaseModel, Field
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.mcp_client import load_mcp_tools
@@ -16,12 +13,12 @@ FAST_MODEL = "gemini-2.5-flash"
 COMPLIANCE_TOKENS = 2000
 
 class ComplianceQuery(BaseModel):
-    """LLM triage of weather the diff is regulated, and what to search for."""
+    """LLM triage of whether the diff is regulated, and what to search for."""
     needs_lookup: bool = Field(
         description=(
             "True if this diff touches ANY regulated concern across frameworks: "
             "personal data / PII (privacy), payment-card data (PCI), patient health "
-            "data (HIPAA), auth, money movement, or audit loggin. "
+            "data (HIPAA), auth, money movement, or audit logging. "
             "False for docs/typos/tests."
         )
     )
@@ -34,12 +31,9 @@ class ComplianceQuery(BaseModel):
     )
 
 async def compliance_node(state: AMSState):
-    """
-    Reason: is this diff regulated, and for what? 
-    Act: run search_compliance_docs per query. 
-    Observe: Collect passages into the audit substate so the security 
-    prompt can cite them.
-    """
+    """Decide if the diff is regulated and for what, then run search_compliance_docs for
+    each query the model proposes and collect the passages into the audit substate so the
+    security prompt can cite them."""
     ams = AMS(state)
     parsed_diff = ams.read("parsed_diff","")
     if not parsed_diff.strip():
