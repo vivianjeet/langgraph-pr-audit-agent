@@ -81,6 +81,12 @@ class AuditState(TypedDict):
     messages: Annotated[list, operator.add]
     parsed_diff: str # ingest writes, all audit nodes read
 
+    # Compliance (MCP): regulatory passages this diff touched + their cited source spans.
+    # Per-run audit data (NOT cross-run memory), so they live here, plain-replace.
+    compliance_context: list      # [{text, source, framework, similarity}] from 
+                                  # search_compliance_docs
+    compliance_citations: list    # [{claim, citations:[{source, cited_text}]}]
+
     # The list of structured findings the agent has disscovered
     security_findings: list[SecurityFinding]
     quality_findings: list[QualityFinding]

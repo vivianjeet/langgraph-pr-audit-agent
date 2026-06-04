@@ -13,6 +13,7 @@ from src.nodes.reflexion import reflexion_node
 from src.nodes.retrieve import retrieve_context_node
 from src.nodes.finalize import finalize_report_node
 from src.nodes.compress import compress_node
+from src.nodes.compliance import compliance_node
 from src.state import Severity
 
 #=================================================================
@@ -103,11 +104,13 @@ builder.add_node("reflexion", reflexion_node)
 builder.add_node("human_review", human_review_node)
 builder.add_node("compress", compress_node)
 builder.add_node("finalize", finalize_report_node)
+builder.add_node("compliance", compliance_node)
 
 # Linear flow at the start
 builder.add_edge(START, "ingest")
 builder.add_edge("ingest", "retrieve")
-builder.add_edge("retrieve", "plan")
+builder.add_edge("retrieve", "compliance")
+builder.add_edge("compliance", "plan")
 
 # Fan out: plan sent to three audit nodes in parallel
 builder.add_edge("plan","security_audit")
