@@ -45,10 +45,24 @@ async def security_audit_node(state: AMSState):
     # (no re-query). security/quality/coverage pull their own.
     rules_block = AMS.rules_block(state.get("procedural", {}), (RuleCategory.SECURITY,))
 
+    # Compliance passages the compliance node pulled (MCP). Inject verbatim so a finding can
+    # cite the regulation it breaks. Empty -> the placeholder collapses (no prompt pollution).
+
+    compliance = ams.read("compliance_context", [])
+    compliance_block = ""
+    if compliance:
+        compliance_block = (
+            "Relevant regulatory passages (cite the source + framework when a finding maps to one):\n"
+            + "\n".join(f"- [{c.get('framework','?')}] {c.get('text','')} (src: {c.get('source','?')})"
+                        for c in compliance)
+            + "\n\n"
+        )
+
     system_prompt = (
         "You are a senior security engineer conducting a PR audit. "
         "The lead reviewer's audit plan flagged these focus areas - prioritise them: {{focus}}\n"
-        "{{rules}}"
+        "{{rules}} \n"
+        "{{compliance}} \n"
         "Analyse the following code changes for security vulnerabilities, specifically "
         "focussing on: \n"
         "- OWASP Top 10 \n"
@@ -65,7 +79,8 @@ async def security_audit_node(state: AMSState):
     messages = [
         {"role": "system", "content": system_prompt
             .replace("{{focus}}", focus)
-            .replace("{{rules}}", rules_block)},
+            .replace("{{rules}}", rules_block)
+            .replace("{{compliance}}", compliance_block)},
         {"role": "user", "content": user_prompt.replace("{{diff}}",parsed_diff)},
     ]
     try:

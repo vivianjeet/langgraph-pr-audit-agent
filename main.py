@@ -2,20 +2,25 @@
 import argparse
 import sys
 import uuid
-from src.graph import app
 from src.llm_retry import QuotaExhaustedError
 from src.state import Severity
 import asyncio
 
-async def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bool:
+async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=None) -> bool:
     """Runs the end to end graph execution on the provided diff.
 
     Local (ci=False): if it pauses for human review, PROMPT for a decision and resume.
     CI (ci=True): there is no stdin, so DON'T prompt - if it paused before human_review, report
     and return escalated=True so the caller can gate the build (exit code); never resume here.
 
+    `app`: the compiled graph to drive. Defaults to the in-RAM (MemorySaver) app; the --durable
+    path passes a SQLite-backed one (see _run_with_app). Threading it in keeps run_audit agnostic
+    to which checkpointer backs the threads.
+
     Returns True if the audit escalated to human review (CI path), else False.
     """
+    if app is None:
+        from src.graph import app          # default: the module-level in-RAM app
 
     print("Starting LangGraph PR Audit Agent... \n")
     initial_state = {
@@ -88,7 +93,7 @@ async def run_audit(diff_text: str, large: bool = False, ci: bool = False) -> bo
         return False   # NO report emitted, by design
 
 
-async def run_gate(large: bool):
+async def run_gate(large: bool, durable: bool = False):
     """The --large pre-merge gate. Audits the REAL diff (changes vs the branch being merged into)
     and forces compression. Two surfaces:
       - LOCAL: ask the base branch, verify it merges cleanly (abort on conflict), audit, report.
@@ -109,13 +114,28 @@ async def run_gate(large: bool):
             sys.exit(1)
 
     diff = resolve_diff(demo=False, base=base)
-    escalated = await run_audit(diff, large=large, ci=ci)
+    if durable:
+        from src.graph import durable_app
+        async with durable_app() as app:
+            escalated = await run_audit(diff, large=large, ci=ci, app=app)
+    else:
+        escalated = await run_audit(diff, large=large, ci=ci)
 
     if ci:
         if escalated and not pr_is_human_approved():
             print("::error::Audit escalated to human review and no APPROVED review found. Blocking merge.")
             sys.exit(1)
         sys.exit(0)
+
+
+async def _run_with_app(diff_text: str, large: bool, durable: bool) -> bool:
+    """Pick the checkpointer backend, then run one audit. --durable -> a SQLite-backed app whose
+    threads survive a process restart; otherwise the default in-RAM app."""
+    if durable:
+        from src.graph import durable_app
+        async with durable_app() as app:
+            return await run_audit(diff_text, large=large, app=app)
+    return await run_audit(diff_text, large=large)
 
 
 def main():
@@ -127,6 +147,10 @@ def main():
                     help=("Force the context-compression pass over the session "
                           "messages even when below the 80%% budget threshold. Without it, "
                           "compression still AUTO-fires if a session genuinely hits 80%%."))
+    parser.add_argument("--durable", action="store_true",
+                    help=("Persist graph threads to a SQLite file (checkpoints.sqlite) so a run "
+                          "paused for human review can resume across process restarts. Default is "
+                          "in-RAM threads that don't survive the process."))
     args = parser.parse_args()
 
     if args.test:
@@ -135,15 +159,15 @@ def main():
         run_smoke_test()
     elif args.demo:
         from tests.test_integration import REAL_DIFF
-        asyncio.run(run_audit(REAL_DIFF, args.large))
+        asyncio.run(_run_with_app(REAL_DIFF, args.large, args.durable))
     elif args.large:
         # --large = the real pre-merge gate: audit the real diff, force compression, and in CI
         # gate the build on findings vs the PR's human-approval state.
-        asyncio.run(run_gate(large=True))
+        asyncio.run(run_gate(large=True, durable=args.durable))
     else:
         # No flags = normal audit on the real diff via the same gate, compression NOT forced
         # (auto-fires only if the session hits 80% of budget).
-        asyncio.run(run_gate(large=False))
+        asyncio.run(run_gate(large=False, durable=args.durable))
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,8 @@
+# US healthcare.
+framework: hipaa
+display_name: "HIPAA (US - healthcare)"
+docs:
+  - source: "HIPAA Security Rule 45 CFR 164.312(a)"
+    content: >
+      Protected Health Information (PHI) must never be written to application logs in plaintext;
+      access to PHI requires authentication and audit logging of every read.

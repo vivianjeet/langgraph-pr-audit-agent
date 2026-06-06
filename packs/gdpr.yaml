@@ -1,0 +1,8 @@
+# EU/India privacy (GDPR + DPDP overlap).
+framework: gdpr
+display_name: "GDPR / DPDP (privacy)"
+docs:
+  - source: "GDPR Art. 32 - Security of processing"
+    content: >
+      Personal data must be protected by appropriate technical measures; logging personal data in
+      plaintext or transferring it without a lawful basis is a processing violation.

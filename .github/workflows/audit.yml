@@ -1,11 +1,17 @@
 name: PR Audit
 
-# Runs on every pull request (and manual dispatch). Two jobs:
+# Runs on every pull request, on a review being submitted, and on manual dispatch. Two jobs:
 #   1. tests  - hermetic suite, always runs, no secrets, free.
 #   2. gate   - the `python main.py --large` pre-merge audit gate. Opt-in: it only runs when
 #               enabled (see TOGGLE below), because it spends LLM credits and needs a DB + secret.
+#
+# pull_request_review closes the human-gate loop automatically: when the audit blocks a PR and a
+# reviewer then Approves, that approval fires this event and re-runs the gate, which now sees the
+# APPROVED review and passes - no manual re-run needed.
 on:
   pull_request:
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
     inputs:
       run_gate:
@@ -50,7 +56,12 @@ jobs:
   # ----------------------------------------------------------------------------
   gate:
     needs: tests
-    if: ${{ vars.RUN_AUDIT_GATE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_gate) }}
+    # Run the gate when it's enabled (RUN_AUDIT_GATE) or dispatched manually - BUT on a review
+    # event, only when the review is an approval, so a plain comment/request-changes review
+    # doesn't burn an LLM run.
+    if: >-
+      (github.event_name != 'pull_request_review' || github.event.review.state == 'approved')
+      && (vars.RUN_AUDIT_GATE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.run_gate))
     runs-on: ubuntu-latest
     env:
       # CI-local DB. NOTE: this is the CI pgvector service's creds (postgres:postgres), NOT your

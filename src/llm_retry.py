@@ -84,10 +84,22 @@ def _is_key_blocked(exc):
     return "API_KEY_SERVICE_BLOCKED" in text or ("403" in text and "PERMISSION_DENIED" in text)
 
 
+def _is_billing_error(exc):
+    """A 429 whose cause is depleted prepay credits / billing, NOT throttling. Retrying or
+    waiting can't refill a wallet, so this is terminal for THIS key. Keys can belong to
+    different billing projects, so we treat it like a blocked key: rotate if another key
+    exists (it may be funded), else fail closed. The status is RESOURCE_EXHAUSTED but the
+    message is the tell - so this MUST be checked before the generic retryable path."""
+    text = str(exc).lower()
+    return "credits are depleted" in text or ("billing" in text and "resource_exhausted" in text)
+
+
 
 def _is_retryable(exc):
     text = str(exc)
     if any(c in text for c in _NON_RETRYABLE_CODES):
+        return False
+    if _is_billing_error(exc):               # depleted credits: terminal for this key, rotation-not-retry
         return False
     if _is_daily_quota(exc):                 # per-day handled by rotation, NOT tenacity retry
         return False
@@ -149,14 +161,13 @@ def _run_with_rotation(fn):
         try:
             return fn()
         except Exception as e:
-            if _is_daily_quota(e) or _is_key_blocked(e):
+            if _is_daily_quota(e) or _is_key_blocked(e) or _is_billing_error(e):
                 if _rotate_from(idx):        # rotate only if nobody else already did
                     continue                 # retry on the (possibly already-rotated) current key                # retry same request on the new key
                 raise QuotaExhaustedError(
-                    """
-                    All Gemini API keys are daily-exhausted or key-blocked - 
-                    aborting audit to avoid a false-clean score.
-                    """
+                    "All Gemini API keys are exhausted, key-blocked, or out of billing credits "
+                    "(prepay depleted). Aborting to avoid a false-clean score. If it's billing, "
+                    "top up the project at https://ai.studio/projects - retrying won't help."
                 ) from e
             raise                            # non-quota errors: already retried by @llm_retry, propagate
 

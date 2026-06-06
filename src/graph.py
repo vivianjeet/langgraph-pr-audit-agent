@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
@@ -12,6 +13,7 @@ from src.nodes.reflexion import reflexion_node
 from src.nodes.retrieve import retrieve_context_node
 from src.nodes.finalize import finalize_report_node
 from src.nodes.compress import compress_node
+from src.nodes.compliance import compliance_node
 from src.state import Severity
 
 #=================================================================
@@ -102,11 +104,13 @@ builder.add_node("reflexion", reflexion_node)
 builder.add_node("human_review", human_review_node)
 builder.add_node("compress", compress_node)
 builder.add_node("finalize", finalize_report_node)
+builder.add_node("compliance", compliance_node)
 
 # Linear flow at the start
 builder.add_edge(START, "ingest")
 builder.add_edge("ingest", "retrieve")
-builder.add_edge("retrieve", "plan")
+builder.add_edge("retrieve", "compliance")
+builder.add_edge("compliance", "plan")
 
 # Fan out: plan sent to three audit nodes in parallel
 builder.add_edge("plan","security_audit")
@@ -158,7 +162,35 @@ _ALLOWED_STATE_TYPES = [
     and issubclass(obj, (_enum.Enum, _BaseModel))
 ]
 serde = JsonPlusSerializer(allowed_msgpack_modules=_ALLOWED_STATE_TYPES)
-memory = MemorySaver(serde=serde)
 
-# interrupt_before acts as hard stop for human approval
-app = builder.compile(checkpointer=memory, interrupt_before=["human_review"])
+
+def build_app(checkpointer):
+    """Compile the graph against ANY checkpointer (MemorySaver, AsyncSqliteSaver, ...).
+    The topology and the human-review interrupt are identical regardless of where threads are
+    persisted - only durability changes. interrupt_before is the hard stop for human approval."""
+    return builder.compile(checkpointer=checkpointer, interrupt_before=["human_review"])
+
+
+# Default checkpointer: in-process, in-RAM threads. Compiled at import so callers can do
+# `from src.graph import app`. Ephemeral - threads vanish when the process exits, which is
+# fine for one-shot runs and CI gating (CI never resumes; it gates on the exit code).
+app = build_app(MemorySaver(serde=serde))
+
+
+@asynccontextmanager
+async def durable_app(db_path: str = "checkpoints.sqlite"):
+    """Opt-in durable checkpointing: yield an `app` whose threads persist to a SQLite file, so a
+    run that PAUSED for human review can resume in a LATER process. Uses AsyncSqliteSaver (not the
+    sync SqliteSaver) because the audit graph runs on app.astream / aget_state - the async driver
+    calls the async checkpoint methods, which only the aio saver implements.
+
+    The SQLite dependency is imported HERE, not at module top, so the default in-RAM path never
+    requires the optional package. Reuses the same `serde` as MemorySaver, so domain types
+    (Severity, *Finding, AuditDepth, ...) round-trip identically through either backend.
+
+    Usage:  async with durable_app() as app: await run_audit(diff, app=app)
+    """
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    async with AsyncSqliteSaver.from_conn_string(db_path) as saver:
+        saver.serde = serde          # from_conn_string takes no serde= kwarg; set it on the instance
+        yield build_app(saver)
