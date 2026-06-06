@@ -1,0 +1,8 @@
+# payment cards.
+framework: pci_dss
+display_name: "PCI-DSS (payment cards)"
+docs:
+  - source: "PCI-DSS v4.0 Req. 3.4"
+    content: >
+      The Primary Account Number (PAN) must never be stored or logged unmasked; display is limited
+      to the first six and last four digits, and storage requires strong cryptography.

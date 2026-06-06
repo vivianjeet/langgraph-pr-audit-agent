@@ -28,7 +28,7 @@ _ACTIVE_RULE_STATUSES = ", ".join(f"'{s.value}'" for s in (RuleStatus.SEEDED, Ru
 _RULE_CATEGORY_VALUES = ", ".join(f"'{c.value}'" for c in RuleCategory)
 
 # --- Destructive: drop all memory tables ---
-_MEMORY_TABLES = ("pr_audits", "session_episodes", "procedural_rules")
+_MEMORY_TABLES = ("pr_audits", "session_episodes", "procedural_rules", "compliance_docs")
 
 # ANSI colour codes for the terminal danger banner.
 _RED = "\033[91m"
@@ -187,6 +187,34 @@ def init_schema():
             WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
             """
         )
+        # Compliance corpus: multi-framework regulatory passages (RBI, HIPAA, PCI-DSS, 
+        # OWASP, GDPR, ...), retrieved by semantic similarity for the MCP 
+        # search_compliance_docs tool. `framework` is a FREE-FORM tag (no CHECK) so a 
+        # contributor's rule pack adds a new framework with zero schema change - 
+        # the open axis of the horizontal product. Same embed+HNSW shape as pr_audits.
+        cur.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS compliance_docs (
+                id          SERIAL PRIMARY KEY,
+                content     TEXT NOT NULL,
+                source      TEXT NOT NULL,
+                framework   TEXT NOT NULL,
+                embedding   VECTOR({EMBED_DIM}) NOT NULL,
+                created_at  TIMESTAMPTZ DEFAULT now()
+            );
+            """
+        )
+        cur.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS compliance_docs_embedding_hnsw
+            ON compliance_docs USING hnsw (embedding vector_cosine_ops)
+            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            """
+        )
+        # Plain btree on framework: cheap WHERE framework = ... filtering for single-pack searches.
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS compliance_docs_framework ON compliance_docs (framework);"
+        )
         conn.commit()
 
 def get_conn():
@@ -234,6 +262,41 @@ def retrieve_similar_prs(query_text: str, k: int = 3) -> list[dict]:
         {"pr_summary": r[0], "report": r[1], "similarity": float(r[2])}
         for r in rows
         if float(r[2]) > SIM_THRESHOLD
+    ]
+
+def search_compliance(query_text: str, k: int = 3, framework: str | None = None) -> list[dict]:
+    """Return up to `k` compliance passages with cosine similarity > SIM_THRESHOLD.
+    Mirrors retrieve_similar_prs: embed the query, HNSW cosine search, strict threshold.
+    `framework` is an optional filter (e.g. 'hipaa') - None searches every pack."""
+    vec = embed(query_text)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH};")
+        if framework:
+            cur.execute(
+                """
+                SELECT content, source, framework, 1 - (embedding <=> %s::vector) AS similarity
+                FROM compliance_docs
+                WHERE framework = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s;
+                """,
+                (vec, framework, vec, k),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT content, source, framework, 1 - (embedding <=> %s::vector) AS similarity
+                FROM compliance_docs
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s;
+                """,
+                (vec, vec, k),
+            )
+        rows = cur.fetchall()
+    return [
+        {"text": r[0], "source": r[1], "framework": r[2], "similarity": float(r[3])}
+        for r in rows
+        if float(r[3]) > SIM_THRESHOLD
     ]
 
 # --- Episodic memory ( session summaries ) ---

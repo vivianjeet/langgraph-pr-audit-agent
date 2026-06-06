@@ -1,0 +1,12 @@
+# Indian banking (Reserve Bank of India). One framework = one file.
+framework: rbi
+display_name: "RBI (India - banking)"
+docs:
+  - source: "RBI Master Direction - IT Framework"
+    content: >
+      Logging of customer PII (PAN, Aadhaar, account numbers) in application logs must be masked;
+      storing unmasked PII is a reportable data-security lapse.
+  - source: "RBI Cyber Security Framework"
+    content: >
+      All database access to customer financial data must use parameterised queries; string-built
+      SQL is an unacceptable injection risk in a regulated system.

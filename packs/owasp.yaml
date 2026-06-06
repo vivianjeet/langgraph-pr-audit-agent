@@ -1,0 +1,8 @@
+# cross-industry application security (tied to NO industry).
+framework: owasp
+display_name: "OWASP (application security)"
+docs:
+  - source: "OWASP Top 10 A03:2021 - Injection"
+    content: >
+      User-controlled input concatenated into SQL, OS commands, or queries is an injection risk;
+      use parameterised queries and context-aware escaping.
