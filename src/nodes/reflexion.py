@@ -57,14 +57,22 @@ def reflexion_node(state: AMSState):
         "(e.g. high score but a lot of test missing, or any such test coverage discrepancy)\n\n"
     )
     user_prompt = (
-        f"security_score: {sec_score}\n"
-        f"quality_score: {quality_score}\n"
-        f"test_score: {test_score}\n"
-        f"security_findings: {sec_findings}\n"
-        f"quality_findings: {quality_findings}\n"
-        f"test_coverage_findings: {test_findings}\n"
-        f"Recent transcript: {transcript}"
+        "security_score: {{sec_score}}\n"
+        "quality_score: {{quality_score}}\n"
+        "test_score: {{test_score}}\n"
+        "security_findings: {{sec_findings}}\n"
+        "quality_findings: {{quality_findings}}\n"
+        "test_coverage_findings: {{test_findings}}\n"
+        "Recent transcript: {{transcript}}"
+        .replace("{{sec_score}}", str(sec_score))
+        .replace("{{quality_score}}", str(quality_score))
+        .replace("{{test_score}}", str(test_score))
+        .replace("{{sec_findings}}", str(sec_findings))
+        .replace("{{quality_findings}}", str(quality_findings))
+        .replace("{{test_findings}}", str(test_findings))
+        .replace("{{transcript}}", transcript)
     )
+
     messages=[
             {"role" : "system", "content" : system_prompt},
             {"role" : "user", "content" : user_prompt}
