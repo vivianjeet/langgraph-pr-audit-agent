@@ -13,7 +13,7 @@ from src.citations import cited_compliance_claims
 
 
 def _coerce(item):
-    """One MCP item -> the original {text, source, framework, similarity} dict, or None.
+    """One MCP item -> the original {text, source, framework, similarity} dict or None.
     The wire wraps our server's dict THREE possible ways, so unwrap each:
       1. a JSON string of the dict;
       2. an MCP content block {'type':'text','text': '<json of the dict>'} - the dict is
@@ -62,7 +62,7 @@ class ComplianceQuery(BaseModel):
             "True if this diff touches ANY regulated concern across frameworks: "
             "personal data / PII (privacy), payment-card data (PCI), patient health "
             "data (HIPAA), auth, money movement, insecure data handling (e.g. SQL injection "
-            "/ untrusted input in queries), or audit logging. "
+            "/ untrusted input in queries) or audit logging. "
             "False for docs/typos/tests."
         )
     )

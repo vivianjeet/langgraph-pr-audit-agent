@@ -22,7 +22,7 @@ mcp = FastMCP("compliance-rag")
 def search_compliance_docs(query: str, k: int = 3, framework: str | None = None) -> list[dict]:
     """Search the multi-framework compliance corpus for passages relevant to `query`.
     Covers many regulations - RBI (banking), HIPAA (healthcare), PCI-DSS (cards), OWASP
-    (app security), GDPR/DPDP (privacy), and any others installed as rule packs. Pass
+    (app security), GDPR/DPDP (privacy) and any others installed as rule packs. Pass
     `framework` (e.g. 'hipaa') to restrict to one; omit it to search all.
     Returns up to `k` passages, each {text, source, framework, similarity}, cosine-ranked,
     above a similarity threshold. Use this to ground a security or compliance finding in an

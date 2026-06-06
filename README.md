@@ -61,7 +61,7 @@ graph TD
 **Routing rules** (precedence: human review > reflect > finalize)
 - `should_reflect`: **any** of the three scores (security/quality/test) in [0.5, 0.7], OR an auth-related file changed with zero **security** findings ("suspicious silence" - security-only heuristic). Capped at 2 loops (`iteration_count` guard).
 
-- `needs_human_review`: any CRITICAL finding (any dimension), or **any** score < 0.5. Graph pauses here (`interrupt_before`).
+- `needs_human_review`: any CRITICAL finding (any dimension) or **any** score < 0.5. Graph pauses here (`interrupt_before`).
 
 
 ### How the pipeline works
@@ -104,7 +104,7 @@ python -m scripts.seed_compliance   # loads every packs/*.yaml (idempotent)
 ### Reliability (banking-grade fail-closed)
 Every Gemini call routes through `src/llm_retry.py`, which:
 - Backs off on per-minute 429s **server-directed first**: it waits the delay the server asks
-  for (`retryDelay`) when present, and only falls back to exponential backoff
+  for (`retryDelay`) when present and only falls back to exponential backoff
   (`wait_exponential(min=1, max=30)`, capped at 90s) when it doesn't - so the client never
   guesses a wait the server already specified. On per-day quota or a blocked key it instead
   **rotates** `GEMINI_API_KEY → KEY2 → KEY3 → KEY4`.
@@ -326,7 +326,7 @@ client parses. Logging is off by default; set `MCP_DEBUG=1` to turn it on:
 
 The log lines appear in your terminal interleaved with the client output (under Claude Desktop they go
 to its MCP log files instead). This is the quick way to see *why* a call came back empty - an empty
-corpus, a `framework` filter that matched nothing, or a similarity threshold that cut every hit.
+corpus, a `framework` filter that matched nothing or a similarity threshold that cut every hit.
 
 ### Connecting Claude Desktop to the compliance server
 
@@ -389,10 +389,10 @@ audit nodes).
 When you assemble a prompt from several pieces - a system prompt, the diff, retrieved precedent,
 chat history - and the total can outgrow the model's window, you need to decide *what to drop* in
 priority order rather than letting the call fail or truncate at a random byte. `TokenBudgetManager`
-(`src/token_budget.py`) does that, and **logs every trim** so nothing is ever dropped silently.
+(`src/token_budget.py`) does that and **logs every trim** so nothing is ever dropped silently.
 
 It is generic by design: it imports nothing from this app (no `AuditState`, no DB). It operates on a
-plain list of labelled, prioritised text `Segment`s and a budget, and returns the segments that fit
+plain list of labelled, prioritised text `Segment`s and a budget and returns the segments that fit
 plus a trim log. The caller is what knows about your state - the manager just honours the priorities
 you assign.
 
@@ -549,7 +549,7 @@ python -m scripts.bench_audit     # live LLM calls (one full audit per run) - ke
 
 A high-risk PR shouldn't auto-merge on the model's say-so. The graph is compiled with
 `interrupt_before=["human_review"]`, so when `synthesize` routes to `human_review`
-(any **CRITICAL** finding, or any score **< 0.5**) the graph **pauses** before that node
+(any **CRITICAL** finding or any score **< 0.5**) the graph **pauses** before that node
 and hands control to a human.
 
 ### Run the interactive audit

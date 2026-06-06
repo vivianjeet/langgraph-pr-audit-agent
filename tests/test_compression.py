@@ -1,5 +1,5 @@
 """Tests in this file: history compression - the pure functions (should_compress,
-compress_history), the live driver (run_compression_pass), and the graph node (compress_node).
+compress_history), the live driver (run_compression_pass) and the graph node (compress_node).
 
 HOW IT WORKS (no DB, no LLM)
 - `call_gemini` is patched on src.compression so compress_history never hits the network;

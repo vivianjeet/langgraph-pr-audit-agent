@@ -11,7 +11,7 @@ class PlanAuditOutput(BaseModel):
     reasoning: str = Field(
         description=(
             "Triage rationale: what about this change drives risk? "
-            "Consider blast radius (auth/payment/PII), surface area, and "
+            "Consider blast radius (auth/payment/PII), surface area and "
             "whether the change touches critical paths. Conclude with why "
             "this risk_level and audit_depth are warranted."
         )
@@ -38,7 +38,7 @@ def plan_audit_node(state: AMSState):
             "audit_plan": default_plan.model_dump()
         }}
 
-    # Pull memory: semantic (similar past audits), episodic (past sessions), and procedural
+    # Pull memory: semantic (similar past audits), episodic (past sessions) and procedural
     # (org rules) were ALL recalled ONCE in the retrieve node and live in the TOP-LEVEL
     # channels. Read them off `state` directly (ams.read is audit-scoped, won't see them);
     # no DB re-query here. The plan uses rules to STEER triage (focus_areas/audit_depth);

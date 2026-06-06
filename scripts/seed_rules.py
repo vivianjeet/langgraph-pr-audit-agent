@@ -15,7 +15,7 @@ from src.db import vectorstore as vs
 SEED_RULES: dict[RuleCategory, list[str]] = {
     RuleCategory.SECURITY: [
         "Never build SQL with f-strings or string concatenation; use parameterised queries.",
-        "No secrets, API keys, or credentials committed in code or config.",
+        "No secrets, API keys or credentials committed in code or config.",
         "Validate and sanitise all external input before use.",
     ],
     RuleCategory.QUALITY: [

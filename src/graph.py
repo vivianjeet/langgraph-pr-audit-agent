@@ -61,7 +61,7 @@ def should_reflect(state: AMSState) -> bool:
 
 def needs_human_review(state: AMSState) -> bool:
     """
-    Escalate to a human on any CRITICAL finding, or a low score (<0.5).
+    Escalate to a human on any CRITICAL finding or a low score (<0.5).
     """
     ams = AMS(state)
     if any(ams.read(key,1.0) < 0.5 for key in SCORE_KEYS):

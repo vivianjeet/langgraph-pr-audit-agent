@@ -1,6 +1,6 @@
 name: PR Audit
 
-# Runs on every pull request, on a review being submitted, and on manual dispatch. Two jobs:
+# Runs on every pull request, on a review being submitted and on manual dispatch. Two jobs:
 #   1. tests  - hermetic suite, always runs, no secrets, free.
 #   2. gate   - the `python main.py --large` pre-merge audit gate. Opt-in: it only runs when
 #               enabled (see TOGGLE below), because it spends LLM credits and needs a DB + secret.

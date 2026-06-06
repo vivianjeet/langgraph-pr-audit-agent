@@ -50,11 +50,11 @@ def reflexion_node(state: AMSState):
         "- Did it check ALL relevant OWASP categories?\n"
         "- Are there changed file types or code paths it ignored ?\n"
         " Is the security_score consistent with the security_findings "
-        "(e.g. high score but auth code touched, or any such security discrepancy)\n"
+        "(e.g. high score but auth code touched or any such security discrepancy)\n"
         " Is the quality_score consistent with the quality_findings "
-        "(e.g. high score but code quality bad, or any such quality discrepancy)\n"
+        "(e.g. high score but code quality bad or any such quality discrepancy)\n"
         " Is the test_score consistent with the test_coverage_findings "
-        "(e.g. high score but a lot of test missing, or any such test coverage discrepancy)\n\n"
+        "(e.g. high score but a lot of test missing or any such test coverage discrepancy)\n\n"
     )
     user_prompt = (
         "security_score: {{sec_score}}\n"

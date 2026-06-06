@@ -1,5 +1,5 @@
 # TokenBudgetManager: explicit context-budget allocation. Keeps highest-priority content
-# first, trims lowest-priority when over budget, and logs every trim (never silent).
+# first, trims lowest-priority when over budget and logs every trim (never silent).
 # Generic by design - operates on labelled text segments, knows nothing about AuditState.
 from dataclasses import dataclass
 
