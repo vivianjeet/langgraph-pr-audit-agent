@@ -1,11 +1,11 @@
 # LangGraph PR Audit Agent
 
-A multi-agent, stateful AI system that automates Pull Request security and quality audits. Framed for banking: every change touching payment logic, customer PII, or auth gets reviewed before merge.
+A multi-agent, stateful AI system that automates Pull Request security and quality audits. Framed for banking: every change touching payment logic, customer PII or auth gets reviewed before merge.
 
 ## What is this project?
 In a bank, a code change that touches auth or payment paths needs a security review before it merges. This agent does that review automatically.
 
-It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub PR diff, applying the **ReAct** (Reason + Act) pattern to check changes against OWASP Top 10, SQL injection, PII leaks, and authentication bypasses.
+It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub PR diff, applying the **ReAct** (Reason + Act) pattern to check changes against OWASP Top 10, SQL injection, PII leaks and authentication bypasses.
 
 ### Core Technologies
 
@@ -69,9 +69,9 @@ graph TD
 2. **Retrieve** embeds the diff (`gemini-embedding-001`) and queries pgvector for similar past audits (cosine > 0.7), feeding precedent into the plan. Degrades gracefully if the DB is unavailable.
 3. **Compliance** (`gemini-2.5-flash`) triages whether the diff is regulated and, if so, pulls matching regulatory passages from the multi-framework corpus over MCP (see [Compliance grounding](#compliance-grounding-over-mcp)). An unregulated diff (docs, typos, tests) short-circuits with no lookup and no wasted call. The passages are carried forward so the security audit can cite the clause a finding breaks.
 4. **Plan** (`gemini-2.5-flash`) triages the diff once - produces an `AuditPlan` (focus areas, risk level, audit depth). This is **Plan-Execute**: the three audits each receive a *targeted* brief instead of re-reading the whole diff cold.
-5. **Three audits run concurrently** - security (OWASP/SQLi/PII/authn), quality (smells, magic numbers, DRY/SOLID), and coverage (missing tests). They are `async` nodes whose Gemini calls overlap (the blocking client runs on a worker thread via `asyncio.to_thread`), so the three LLM round-trips happen at once rather than in series - real concurrency, not just LangGraph's structural fan-out. All are **plan-aware** (they read `audit_plan.focus_areas`).
+5. **Three audits run concurrently** - security (OWASP/SQLi/PII/authn), quality (smells, magic numbers, DRY/SOLID) and coverage (missing tests). They are `async` nodes whose Gemini calls overlap (the blocking client runs on a worker thread via `asyncio.to_thread`), so the three LLM round-trips happen at once rather than in series - real concurrency, not just LangGraph's structural fan-out. All are **plan-aware** (they read `audit_plan.focus_areas`).
 6. **Synthesize** computes deterministic, severity-weighted scores ($0, no LLM) the router can act on.
-7. **Reflexion** (`gemini-2.5-pro`) - on a borderline result, a *smarter* model critiques the audit, identifies gaps, and loops back to plan for a sharper second pass (max 2 loops).
+7. **Reflexion** (`gemini-2.5-pro`) - on a borderline result, a *smarter* model critiques the audit, identifies gaps and loops back to plan for a sharper second pass (max 2 loops).
 8. **Human review** - on a CRITICAL finding or score < 0.5, the graph **pauses** at `human_review` (`interrupt_before`) for a human decision (see [Human-in-the-Loop](#human-in-the-loop-pause--inject--resume)); otherwise it skips straight on.
 9. **Compress** - both paths into finalize funnel through a `compress` node that compacts the oldest portion of the session history when it has grown large (or when forced); a no-op pass-through otherwise (see [History compression](#history-compression-the-compress-node)).
 10. **Finalize** - assembles the markdown report and persists it to pgvector as precedent (and, when compression fired, stores the *compacted* history as the session episode).
@@ -84,6 +84,16 @@ The corpus is pluggable. Frameworks live in `packs/*.yaml` data files; RBI (bank
 The agent is on both ends of the protocol. As a *client*, the `compliance` node connects via `MultiServerMCPClient` and calls `search_compliance_docs` over stdio. It fails soft - if the server can't start, or the diff isn't regulated, the audit carries on with empty context and a visible trace line instead of crashing or quietly reporting "clean". As a *server*, `src/mcp/compliance_rag_server.py` (`FastMCP`) exposes that same retrieval as a tool whose `@mcp.tool()` docstring *is* the schema the calling model reads. Anything that speaks MCP - Claude Desktop, a raw-SDK client - can call it with no glue, because the tool is a protocol endpoint rather than a Python import trapped in this process.
 
 When the diff is regulated, the retrieved passages go into the security-audit prompt and the model cites the clause directly. A planted SQL-injection diff produces a finding with a `Citations:` block quoting the *RBI Cyber Security Framework* and *OWASP A03:2021 - Injection*. On an unregulated diff the injection is empty, so there's no token cost when there's no rule to cite.
+
+For the audit trail, an in-prompt citation isn't enough - "the model says this breaks RBI" needs the exact clause, and a model can paraphrase or invent one. So the report carries a separate **Compliance audit trail**: the agent asks the model to quote, verbatim, the span each concern is grounded in, then verifies that span is a real substring of the passage it names and drops any that isn't. A confidently hallucinated citation in a compliance trail is worse than none, so the substring check is the trust boundary - every span that renders is a guaranteed-verbatim quote from a real passage, never a paraphrase the model drifted on. A hosted citations API would enforce that server-side; here it runs on the same Gemini spine as everything else (`src/citations.py`, `gemini-2.5-flash` - extraction, not reasoning), so there's no second provider or auth model. The result is a per-claim blockquote in the report:
+
+```markdown
+### Compliance audit trail
+- Logs PII without masking.
+  > "Sensitive customer data: PII must be masked in logs." -- RBI
+```
+
+A clean diff renders no section - the absence of a citation is never dressed up as a clean bill of health.
 
 ```bash
 docker compose up -d
@@ -209,7 +219,7 @@ python -m scripts.review_rules
 It runs in two phases:
 
 **1. Review proposed rules** (`learned_pending`). For each one it shows the rule, the verdict on the
-PR it was learned from, and any near-duplicate existing rules (by cosine similarity) so you can catch
+PR it was learned from and any near-duplicate existing rules (by cosine similarity) so you can catch
 reworded re-learns. You answer per rule:
 
 | Key | Action | Effect |
@@ -260,16 +270,23 @@ code change. `category` (security/quality/coverage) is a typed enum the engine r
 **As a server.** `compliance-rag-server` (`src/mcp/compliance_rag_server.py`) exposes two tools
 over stdio - `search_compliance_docs` (multi-framework passage search, with an optional `framework`
 filter) and `get_pr_audit_history` (similar past audits). Because it speaks MCP, ANY MCP-compatible
-client can use it: Claude Desktop, another LangGraph agent, or the included
+client can use it: Claude Desktop, another LangGraph agent or the included
 `scripts/mcp_test_client.py`. The compliance RAG is shared infrastructure any of them can reach,
 instead of a function locked inside one process.
 
-    [ Claude Desktop ]     [ this LangGraph agent ]     [ mcp_test_client.py ]
-            \                        |                          /
-             \                       |                         /
-              +----------> compliance-rag-server (stdio) <----+
-                                     |
-                  pgvector: compliance_docs (RBI/HIPAA/PCI/OWASP/GDPR) + pr_audits
+```mermaid
+flowchart TD
+    desktop["Claude Desktop"]
+    agent["this LangGraph agent"]
+    client["mcp_test_client.py"]
+    server["compliance-rag-server (stdio)"]
+    db[("pgvector: compliance_docs<br/>(RBI / HIPAA / PCI / OWASP / GDPR) + pr_audits")]
+
+    desktop --> server
+    agent --> server
+    client --> server
+    server --> db
+```
 
 **Why MCP over a custom tool.** A custom tool lives and dies inside one Python process; an MCP tool
 is a typed protocol endpoint any agent can reuse. The cost is one subprocess hop; the benefit is the
@@ -301,7 +318,7 @@ genuinely spec-compliant, not just compatible with one adapter:
 The cross-framework call returns passages from several packs; the filtered call returns HIPAA-only -
 proving the `framework` parameter works over the wire, not just in-process.
 
-**Seeing what the server is doing.** The server logs each tool call (the query, and how many passages
+**Seeing what the server is doing.** The server logs each tool call (the query and how many passages
 came back from which frameworks) to `stderr` - never `stdout`, which carries the JSON-RPC protocol the
 client parses. Logging is off by default; set `MCP_DEBUG=1` to turn it on:
 
@@ -414,7 +431,7 @@ TokenBudgetManager(budget_tokens=8000, counter=my_real_tokenizer)
 
 This repo does **not** route the live audit through the budget manager, and that is deliberate: a
 single PR diff is far smaller than Gemini's ~1M-token window, so an in-band budget check here would
-always keep everything, trim nothing, and only add latency. The class and its tests are the artifact;
+always keep everything, trim nothing and only add latency. The class and its tests are the artifact;
 it is demonstrated under synthetic oversized load in `tests/test_token_budget.py`.
 
 If you are cloning this to handle genuinely huge diffs, the budget manager is the **last** mile, not
@@ -483,7 +500,7 @@ is a no-op. It dedups, so editing the rule list and re-running only inserts what
 
 ## In case you have to NUKE the schema
 > **Destructive - read before running.** This permanently deletes all stored
-> audits, session episodes, and rules. Only use it when you want a clean slate
+> audits, session episodes and rules. Only use it when you want a clean slate
 > (e.g. after a schema change that `CREATE TABLE IF NOT EXISTS` can't apply to an
 > existing table).
 ```bash
@@ -730,7 +747,7 @@ when `LANGCHAIN_API_KEY` is also present.
 Every LLM call in the graph is traceable. LangSmith auto-instruments the run from environment
 variables alone - no application code needed - so each audit produces a full node-by-node
 trace (`ingest → retrieve → plan → security/quality/test audits → synthesize → reflexion`),
-including the exact prompt, model, latency, token counts, and the Instructor-validated output
+including the exact prompt, model, latency, token counts and the Instructor-validated output
 for every Gemini call.
 
 Set these in your `.env`:
@@ -743,7 +760,7 @@ LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
 
 Then run any audit and view the trace:
 ```bash
-python main.py --test        # or --demo, or any real run
+python main.py --test        # or --demo or any real run
 ```
 Open **https://smith.langchain.com** → project **`langgraph-pr-audit-agent`**. Each run is one
 trace; drill into any node to see its prompt and structured output. This is what makes a
