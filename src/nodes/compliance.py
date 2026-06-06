@@ -1,7 +1,7 @@
 # src/nodes/compliance.py - pull regulatory context for the PR via MCP tools.
 # The agent acts as an MCP client here. The node sits between retrieve and plan, so
 # precedent (retrieve) and regulatory context (here) both land before the plan triages.
-# Fail-closed: no tools, a tool error, or an unregulated diff all give empty context plus
+# Fail-closed: no tools, a tool error or an unregulated diff all give empty context plus
 # a visible message. Never a crash, never a silent "looks clean".
 import json
 from pydantic import BaseModel, Field
@@ -9,6 +9,7 @@ from src.memory import AgentMemorySystem as AMS, AMSState
 from src.mcp_client import load_mcp_tools
 from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.text_utils import clip
+from src.citations import cited_compliance_claims
 
 
 def _coerce(item):
@@ -40,7 +41,7 @@ def _coerce(item):
 
 def _normalize_hits(result) -> list[dict]:
     """The server returns list[dict], but langchain-mcp-adapters re-serializes tool output over
-    the wire - as a JSON string, a list of content blocks, or a JSON string of the whole list.
+    the wire - as a JSON string, a list of content blocks or a JSON string of the whole list.
     Normalise every shape back to list[dict] so h.get('framework')/'source' resolve (else '?')."""
     if isinstance(result, str):
         try:
@@ -91,13 +92,14 @@ async def compliance_node(state: AMSState):
     system_prompt = (
         "You triage whether a code diff touches any regulated concerns across compliance"
         " frameworks: personal data / PII (privacy: GDPR/DPDP), payment-card data "
-        "(PCI-DSS), patient health data (HIPAA), authentication, money movement, or "
+        "(PCI-DSS), patient health data (HIPAA), authentication, money movement or "
         "audit logging. If so, propose 1-3 short search queries for a multi-framework "
         "compliance document store. If not, set needs_lookup=False with no queries."
     )
     messages = [
         {"role": "system", "content" : system_prompt},
-        {"role": "user",  "content": f"Diff:\n{parsed_diff}"},
+        {"role": "user",  "content": "Diff:\n{{parsed_diff}}"
+                                .replace("{{parsed_diff}}", parsed_diff)},
     ]
     try:
         triage = await call_gemini_async(model=FAST_MODEL, messages=messages,
@@ -141,9 +143,14 @@ async def compliance_node(state: AMSState):
             continue
         hits.extend(_normalize_hits(result))
     
+    try:
+        cited = cited_compliance_claims(parsed_diff, hits)
+    except Exception:
+        cited = []
+    
     # --- Observe: surface a trace line + carry the passages for the security prompt. ---
     lines = [f"- [{h.get('framework', '?')}] {clip(h.get('text', ''), 160)} (src: {h.get('source', '?')})"
              for h in hits]
     msg = ("System: Compliance context:\n" + "\n".join(lines)) if lines else \
           "System: Compliance - no matching passages above threshold."
-    return {"audit": {"messages": [msg], "compliance_context": hits}}
+    return {"audit": {"messages": [msg], "compliance_context": hits, "compliance_citations": cited}}
