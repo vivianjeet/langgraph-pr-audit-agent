@@ -301,6 +301,16 @@ genuinely spec-compliant, not just compatible with one adapter:
 The cross-framework call returns passages from several packs; the filtered call returns HIPAA-only -
 proving the `framework` parameter works over the wire, not just in-process.
 
+**Seeing what the server is doing.** The server logs each tool call (the query, and how many passages
+came back from which frameworks) to `stderr` - never `stdout`, which carries the JSON-RPC protocol the
+client parses. Logging is off by default; set `MCP_DEBUG=1` to turn it on:
+
+    MCP_DEBUG=1 python -m scripts.mcp_test_client
+
+The log lines appear in your terminal interleaved with the client output (under Claude Desktop they go
+to its MCP log files instead). This is the quick way to see *why* a call came back empty - an empty
+corpus, a `framework` filter that matched nothing, or a similarity threshold that cut every hit.
+
 ### Connecting Claude Desktop to the compliance server
 
 Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
