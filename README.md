@@ -237,6 +237,88 @@ reworded re-learns. You answer per rule:
 
 ---
 
+## MCP integration
+
+The audit's external tools are exposed and consumed over the Model Context Protocol rather than as
+in-process Python wrappers. That one decision is what makes the compliance RAG reusable by anything
+that speaks MCP.
+
+**As a client.** The agent connects to MCP servers via `MultiServerMCPClient` - a read-only
+filesystem server (repo context) and the compliance-rag server below. A `compliance` node runs
+between retrieval and planning: it triages whether a diff touches regulated concerns (personal data,
+payment-card data, health data, auth, money movement, audit logging) and, if so, calls
+`search_compliance_docs` to ground the audit in the actual regulatory clauses before the plan is
+drawn up. A diff that isn't regulated skips the lookup entirely - no wasted call.
+
+**Multi-framework, plug-and-play.** The compliance corpus is not tied to one industry. Each
+regulation is a rule pack - a `packs/<framework>.yaml` data file - loaded into the store at seed
+time. RBI (banking), HIPAA (healthcare), PCI-DSS (payments), OWASP (application security), and
+GDPR/DPDP (privacy) ship by default; adding another (SOX, FedRAMP, ...) is dropping a YAML file, no
+code change. `category` (security/quality/coverage) is a typed enum the engine reasons over;
+`framework` is an open tag, so contributors extend the breadth without touching the core.
+
+**As a server.** `compliance-rag-server` (`src/mcp/compliance_rag_server.py`) exposes two tools
+over stdio - `search_compliance_docs` (multi-framework passage search, with an optional `framework`
+filter) and `get_pr_audit_history` (similar past audits). Because it speaks MCP, ANY MCP-compatible
+client can use it: Claude Desktop, another LangGraph agent, or the included
+`scripts/mcp_test_client.py`. The compliance RAG is shared infrastructure any of them can reach,
+instead of a function locked inside one process.
+
+    [ Claude Desktop ]     [ this LangGraph agent ]     [ mcp_test_client.py ]
+            \                        |                          /
+             \                       |                         /
+              +----------> compliance-rag-server (stdio) <----+
+                                     |
+                  pgvector: compliance_docs (RBI/HIPAA/PCI/OWASP/GDPR) + pr_audits
+
+**Why MCP over a custom tool.** A custom tool lives and dies inside one Python process; an MCP tool
+is a typed protocol endpoint any agent can reuse. The cost is one subprocess hop; the benefit is the
+compliance RAG becomes a shared capability instead of a private function.
+
+### Verifying the server over stdio
+
+`scripts/mcp_test_client.py` is a standalone client (raw `mcp` SDK, no LangChain) that spawns the
+server as a subprocess and drives the full `initialize -> list_tools -> call_tool` handshake - the
+same wire protocol Claude Desktop uses. If it lists both tools and returns passages, the server is
+genuinely spec-compliant, not just compatible with one adapter:
+
+    python -m scripts.seed_compliance     # ensure the corpus exists
+    python -m scripts.mcp_test_client     # talk to the server over stdio
+
+    Tools exposed by compliance-rag-server:
+      - search_compliance_docs : search regulatory passages across frameworks (optional framework filter)
+      - get_pr_audit_history   : retrieve similar past PR audits
+
+    search_compliance_docs('PII logging', k=3)  [all frameworks]:
+       [gdpr] Personal data must not be written to application logs in identifiable form ...
+       [pci_dss] PAN must be rendered unreadable; logging of full PAN is prohibited ...
+       [rbi] Sensitive customer data in logs must be masked per the Cyber Security Framework ...
+
+    search_compliance_docs('PHI in logs', k=2, framework='hipaa')  [one pack]:
+       [hipaa] PHI written to logs is a disclosure; logs containing PHI fall under the Security Rule ...
+       [hipaa] Audit controls must record access to ePHI without exposing the ePHI itself ...
+
+The cross-framework call returns passages from several packs; the filtered call returns HIPAA-only -
+proving the `framework` parameter works over the wire, not just in-process.
+
+### Connecting Claude Desktop to the compliance server
+
+Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
+
+    {
+      "mcpServers": {
+        "compliance-rag": {
+          "command": "python",
+          "args": ["-m", "src.mcp.compliance_rag_server"],
+          "cwd": "/absolute/path/to/langgraph-pr-audit-agent"
+        }
+      }
+    }
+
+Then `search_compliance_docs` and `get_pr_audit_history` appear as tools in Claude Desktop.
+
+---
+
 ## History compression (the `compress` node)
 
 A long-running session accumulates messages - plan, three audit results, reflexion passes, the
