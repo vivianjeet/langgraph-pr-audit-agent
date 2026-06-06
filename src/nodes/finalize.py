@@ -24,7 +24,7 @@ def finalize_report_node(state: AMSState):
         "security_findings": _findings_to_dicts(ams.read("security_findings",[])),
         "quality_findings": _findings_to_dicts(ams.read("quality_findings",[])),
         "test_findings": _findings_to_dicts(ams.read("test_findings",[])),
-        "files_changed": ams.read("files_changed",[])
+        "files_changed": ams.read("files_changed",[]),
     }
 
     md = [
@@ -50,6 +50,15 @@ def finalize_report_node(state: AMSState):
         md.append(f"- `{f['severity']}` {f['file_path']} - {f['description']}")
 
     markdown = "\n".join(md)
+    # Compliance audit trail: each claim with the exact regulatory span it's grounded in.
+    citations = ams.read("compliance_citations", [])
+    if citations:
+        lines = ["", "### Compliance audit trail", ""]
+        for c in citations:
+            lines.append(f"- {c['claim']}")
+            for cite in c["citations"]:
+                lines.append(f"  > \"{cite['cited_text']}\" -- {cite['source']}")
+        markdown += "\n".join(lines) + "\n"
 
     # Persist so the NEXT similar PR can retrieve this as precedent (best-effort).
     summary = (f"Files: {report['files_changed']}; quality_score {report['quality_score']}; "

@@ -103,7 +103,7 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
 
 def init_schema():
     """
-    Create the extension, table, and HNSW index. Idempotent - safe to re run.
+    Create the extension, table and HNSW index. Idempotent - safe to re run.
     """
     with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn, conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
@@ -382,7 +382,7 @@ def get_all_rule_contents(category: RuleCategory) -> list[str]:
 # --- Procedural rule governance (offline review CLI) ---
 def list_pending_rules() -> list[dict]:
     """All rules awaiting human review (learned_pending). Returns id (needed to target
-    approve/reject), category, content, and source_decision (the PR verdict it was learned
+    approve/reject), category, content and source_decision (the PR verdict it was learned
     from). Ordered by id so the CLI lists them stably."""
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -462,7 +462,7 @@ def drop_schema() -> None:
     Drop ALL memory tables (pr_audits, session_episodes, procedural_rules).
 
     DESTRUCTIVE and irreversible: permanently deletes every stored audit,
-    session episode, and procedural rule.
+    session episode and procedural rule.
 
     Requires interactive confirmation: the caller must type 'yes' at the prompt.
     """
@@ -472,7 +472,7 @@ def drop_schema() -> None:
         "============================================================\n"
         "  ⚠  DANGER: this will PERMANENTLY DROP these tables:\n"
         f"      {', '.join(_MEMORY_TABLES)}\n"
-        "  All stored audits, episodes, and rules will be lost.\n"
+        "  All stored audits, episodes and rules will be lost.\n"
         "  This cannot be undone.\n"
         "============================================================"
         f"{_RESET}"

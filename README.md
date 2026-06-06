@@ -1,11 +1,11 @@
 # LangGraph PR Audit Agent
 
-A multi-agent, stateful AI system that automates Pull Request security and quality audits. Framed for banking: every change touching payment logic, customer PII, or auth gets reviewed before merge.
+A multi-agent, stateful AI system that automates Pull Request security and quality audits. Framed for banking: every change touching payment logic, customer PII or auth gets reviewed before merge.
 
 ## What is this project?
 In a bank, a code change that touches auth or payment paths needs a security review before it merges. This agent does that review automatically.
 
-It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub PR diff, applying the **ReAct** (Reason + Act) pattern to check changes against OWASP Top 10, SQL injection, PII leaks, and authentication bypasses.
+It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub PR diff, applying the **ReAct** (Reason + Act) pattern to check changes against OWASP Top 10, SQL injection, PII leaks and authentication bypasses.
 
 ### Core Technologies
 
@@ -61,7 +61,7 @@ graph TD
 **Routing rules** (precedence: human review > reflect > finalize)
 - `should_reflect`: **any** of the three scores (security/quality/test) in [0.5, 0.7], OR an auth-related file changed with zero **security** findings ("suspicious silence" - security-only heuristic). Capped at 2 loops (`iteration_count` guard).
 
-- `needs_human_review`: any CRITICAL finding (any dimension), or **any** score < 0.5. Graph pauses here (`interrupt_before`).
+- `needs_human_review`: any CRITICAL finding (any dimension) or **any** score < 0.5. Graph pauses here (`interrupt_before`).
 
 
 ### How the pipeline works
@@ -69,9 +69,9 @@ graph TD
 2. **Retrieve** embeds the diff (`gemini-embedding-001`) and queries pgvector for similar past audits (cosine > 0.7), feeding precedent into the plan. Degrades gracefully if the DB is unavailable.
 3. **Compliance** (`gemini-2.5-flash`) triages whether the diff is regulated and, if so, pulls matching regulatory passages from the multi-framework corpus over MCP (see [Compliance grounding](#compliance-grounding-over-mcp)). An unregulated diff (docs, typos, tests) short-circuits with no lookup and no wasted call. The passages are carried forward so the security audit can cite the clause a finding breaks.
 4. **Plan** (`gemini-2.5-flash`) triages the diff once - produces an `AuditPlan` (focus areas, risk level, audit depth). This is **Plan-Execute**: the three audits each receive a *targeted* brief instead of re-reading the whole diff cold.
-5. **Three audits run concurrently** - security (OWASP/SQLi/PII/authn), quality (smells, magic numbers, DRY/SOLID), and coverage (missing tests). They are `async` nodes whose Gemini calls overlap (the blocking client runs on a worker thread via `asyncio.to_thread`), so the three LLM round-trips happen at once rather than in series - real concurrency, not just LangGraph's structural fan-out. All are **plan-aware** (they read `audit_plan.focus_areas`).
+5. **Three audits run concurrently** - security (OWASP/SQLi/PII/authn), quality (smells, magic numbers, DRY/SOLID) and coverage (missing tests). They are `async` nodes whose Gemini calls overlap (the blocking client runs on a worker thread via `asyncio.to_thread`), so the three LLM round-trips happen at once rather than in series - real concurrency, not just LangGraph's structural fan-out. All are **plan-aware** (they read `audit_plan.focus_areas`).
 6. **Synthesize** computes deterministic, severity-weighted scores ($0, no LLM) the router can act on.
-7. **Reflexion** (`gemini-2.5-pro`) - on a borderline result, a *smarter* model critiques the audit, identifies gaps, and loops back to plan for a sharper second pass (max 2 loops).
+7. **Reflexion** (`gemini-2.5-pro`) - on a borderline result, a *smarter* model critiques the audit, identifies gaps and loops back to plan for a sharper second pass (max 2 loops).
 8. **Human review** - on a CRITICAL finding or score < 0.5, the graph **pauses** at `human_review` (`interrupt_before`) for a human decision (see [Human-in-the-Loop](#human-in-the-loop-pause--inject--resume)); otherwise it skips straight on.
 9. **Compress** - both paths into finalize funnel through a `compress` node that compacts the oldest portion of the session history when it has grown large (or when forced); a no-op pass-through otherwise (see [History compression](#history-compression-the-compress-node)).
 10. **Finalize** - assembles the markdown report and persists it to pgvector as precedent (and, when compression fired, stores the *compacted* history as the session episode).
@@ -85,6 +85,16 @@ The agent is on both ends of the protocol. As a *client*, the `compliance` node 
 
 When the diff is regulated, the retrieved passages go into the security-audit prompt and the model cites the clause directly. A planted SQL-injection diff produces a finding with a `Citations:` block quoting the *RBI Cyber Security Framework* and *OWASP A03:2021 - Injection*. On an unregulated diff the injection is empty, so there's no token cost when there's no rule to cite.
 
+For the audit trail, an in-prompt citation isn't enough - "the model says this breaks RBI" needs the exact clause, and a model can paraphrase or invent one. So the report carries a separate **Compliance audit trail**: the agent asks the model to quote, verbatim, the span each concern is grounded in, then verifies that span is a real substring of the passage it names and drops any that isn't. A confidently hallucinated citation in a compliance trail is worse than none, so the substring check is the trust boundary - every span that renders is a guaranteed-verbatim quote from a real passage, never a paraphrase the model drifted on. A hosted citations API would enforce that server-side; here it runs on the same Gemini spine as everything else (`src/citations.py`, `gemini-2.5-flash` - extraction, not reasoning), so there's no second provider or auth model. The result is a per-claim blockquote in the report:
+
+```markdown
+### Compliance audit trail
+- Logs PII without masking.
+  > "Sensitive customer data: PII must be masked in logs." -- RBI
+```
+
+A clean diff renders no section - the absence of a citation is never dressed up as a clean bill of health.
+
 ```bash
 docker compose up -d
 python -m src.db.vectorstore        # creates the compliance_docs table + HNSW index
@@ -94,7 +104,7 @@ python -m scripts.seed_compliance   # loads every packs/*.yaml (idempotent)
 ### Reliability (banking-grade fail-closed)
 Every Gemini call routes through `src/llm_retry.py`, which:
 - Backs off on per-minute 429s **server-directed first**: it waits the delay the server asks
-  for (`retryDelay`) when present, and only falls back to exponential backoff
+  for (`retryDelay`) when present and only falls back to exponential backoff
   (`wait_exponential(min=1, max=30)`, capped at 90s) when it doesn't - so the client never
   guesses a wait the server already specified. On per-day quota or a blocked key it instead
   **rotates** `GEMINI_API_KEY → KEY2 → KEY3 → KEY4`.
@@ -209,7 +219,7 @@ python -m scripts.review_rules
 It runs in two phases:
 
 **1. Review proposed rules** (`learned_pending`). For each one it shows the rule, the verdict on the
-PR it was learned from, and any near-duplicate existing rules (by cosine similarity) so you can catch
+PR it was learned from and any near-duplicate existing rules (by cosine similarity) so you can catch
 reworded re-learns. You answer per rule:
 
 | Key | Action | Effect |
@@ -234,6 +244,105 @@ reworded re-learns. You answer per rule:
 > The similarity hint is **advisory only**: cosine similarity is a rough proxy for "duplicate", not
 > proof, and the threshold is untuned. The tool shows the score and you decide - it never
 > auto-removes a rule. The human approval gate is the real deduplicator.
+
+---
+
+## MCP integration
+
+The audit's external tools are exposed and consumed over the Model Context Protocol rather than as
+in-process Python wrappers. That one decision is what makes the compliance RAG reusable by anything
+that speaks MCP.
+
+**As a client.** The agent connects to MCP servers via `MultiServerMCPClient` - a read-only
+filesystem server (repo context) and the compliance-rag server below. A `compliance` node runs
+between retrieval and planning: it triages whether a diff touches regulated concerns (personal data,
+payment-card data, health data, auth, money movement, audit logging) and, if so, calls
+`search_compliance_docs` to ground the audit in the actual regulatory clauses before the plan is
+drawn up. A diff that isn't regulated skips the lookup entirely - no wasted call.
+
+**Multi-framework, plug-and-play.** The compliance corpus is not tied to one industry. Each
+regulation is a rule pack - a `packs/<framework>.yaml` data file - loaded into the store at seed
+time. RBI (banking), HIPAA (healthcare), PCI-DSS (payments), OWASP (application security), and
+GDPR/DPDP (privacy) ship by default; adding another (SOX, FedRAMP, ...) is dropping a YAML file, no
+code change. `category` (security/quality/coverage) is a typed enum the engine reasons over;
+`framework` is an open tag, so contributors extend the breadth without touching the core.
+
+**As a server.** `compliance-rag-server` (`src/mcp/compliance_rag_server.py`) exposes two tools
+over stdio - `search_compliance_docs` (multi-framework passage search, with an optional `framework`
+filter) and `get_pr_audit_history` (similar past audits). Because it speaks MCP, ANY MCP-compatible
+client can use it: Claude Desktop, another LangGraph agent or the included
+`scripts/mcp_test_client.py`. The compliance RAG is shared infrastructure any of them can reach,
+instead of a function locked inside one process.
+
+```mermaid
+flowchart TD
+    desktop["Claude Desktop"]
+    agent["this LangGraph agent"]
+    client["mcp_test_client.py"]
+    server["compliance-rag-server (stdio)"]
+    db[("pgvector: compliance_docs<br/>(RBI / HIPAA / PCI / OWASP / GDPR) + pr_audits")]
+
+    desktop --> server
+    agent --> server
+    client --> server
+    server --> db
+```
+
+**Why MCP over a custom tool.** A custom tool lives and dies inside one Python process; an MCP tool
+is a typed protocol endpoint any agent can reuse. The cost is one subprocess hop; the benefit is the
+compliance RAG becomes a shared capability instead of a private function.
+
+### Verifying the server over stdio
+
+`scripts/mcp_test_client.py` is a standalone client (raw `mcp` SDK, no LangChain) that spawns the
+server as a subprocess and drives the full `initialize -> list_tools -> call_tool` handshake - the
+same wire protocol Claude Desktop uses. If it lists both tools and returns passages, the server is
+genuinely spec-compliant, not just compatible with one adapter:
+
+    python -m scripts.seed_compliance     # ensure the corpus exists
+    python -m scripts.mcp_test_client     # talk to the server over stdio
+
+    Tools exposed by compliance-rag-server:
+      - search_compliance_docs : search regulatory passages across frameworks (optional framework filter)
+      - get_pr_audit_history   : retrieve similar past PR audits
+
+    search_compliance_docs('PII logging', k=3)  [all frameworks]:
+       [gdpr] Personal data must not be written to application logs in identifiable form ...
+       [pci_dss] PAN must be rendered unreadable; logging of full PAN is prohibited ...
+       [rbi] Sensitive customer data in logs must be masked per the Cyber Security Framework ...
+
+    search_compliance_docs('PHI in logs', k=2, framework='hipaa')  [one pack]:
+       [hipaa] PHI written to logs is a disclosure; logs containing PHI fall under the Security Rule ...
+       [hipaa] Audit controls must record access to ePHI without exposing the ePHI itself ...
+
+The cross-framework call returns passages from several packs; the filtered call returns HIPAA-only -
+proving the `framework` parameter works over the wire, not just in-process.
+
+**Seeing what the server is doing.** The server logs each tool call (the query and how many passages
+came back from which frameworks) to `stderr` - never `stdout`, which carries the JSON-RPC protocol the
+client parses. Logging is off by default; set `MCP_DEBUG=1` to turn it on:
+
+    MCP_DEBUG=1 python -m scripts.mcp_test_client
+
+The log lines appear in your terminal interleaved with the client output (under Claude Desktop they go
+to its MCP log files instead). This is the quick way to see *why* a call came back empty - an empty
+corpus, a `framework` filter that matched nothing or a similarity threshold that cut every hit.
+
+### Connecting Claude Desktop to the compliance server
+
+Add to your Claude Desktop MCP config (`claude_desktop_config.json`):
+
+    {
+      "mcpServers": {
+        "compliance-rag": {
+          "command": "python",
+          "args": ["-m", "src.mcp.compliance_rag_server"],
+          "cwd": "/absolute/path/to/langgraph-pr-audit-agent"
+        }
+      }
+    }
+
+Then `search_compliance_docs` and `get_pr_audit_history` appear as tools in Claude Desktop.
 
 ---
 
@@ -280,10 +389,10 @@ audit nodes).
 When you assemble a prompt from several pieces - a system prompt, the diff, retrieved precedent,
 chat history - and the total can outgrow the model's window, you need to decide *what to drop* in
 priority order rather than letting the call fail or truncate at a random byte. `TokenBudgetManager`
-(`src/token_budget.py`) does that, and **logs every trim** so nothing is ever dropped silently.
+(`src/token_budget.py`) does that and **logs every trim** so nothing is ever dropped silently.
 
 It is generic by design: it imports nothing from this app (no `AuditState`, no DB). It operates on a
-plain list of labelled, prioritised text `Segment`s and a budget, and returns the segments that fit
+plain list of labelled, prioritised text `Segment`s and a budget and returns the segments that fit
 plus a trim log. The caller is what knows about your state - the manager just honours the priorities
 you assign.
 
@@ -322,7 +431,7 @@ TokenBudgetManager(budget_tokens=8000, counter=my_real_tokenizer)
 
 This repo does **not** route the live audit through the budget manager, and that is deliberate: a
 single PR diff is far smaller than Gemini's ~1M-token window, so an in-band budget check here would
-always keep everything, trim nothing, and only add latency. The class and its tests are the artifact;
+always keep everything, trim nothing and only add latency. The class and its tests are the artifact;
 it is demonstrated under synthetic oversized load in `tests/test_token_budget.py`.
 
 If you are cloning this to handle genuinely huge diffs, the budget manager is the **last** mile, not
@@ -391,7 +500,7 @@ is a no-op. It dedups, so editing the rule list and re-running only inserts what
 
 ## In case you have to NUKE the schema
 > **Destructive - read before running.** This permanently deletes all stored
-> audits, session episodes, and rules. Only use it when you want a clean slate
+> audits, session episodes and rules. Only use it when you want a clean slate
 > (e.g. after a schema change that `CREATE TABLE IF NOT EXISTS` can't apply to an
 > existing table).
 ```bash
@@ -440,7 +549,7 @@ python -m scripts.bench_audit     # live LLM calls (one full audit per run) - ke
 
 A high-risk PR shouldn't auto-merge on the model's say-so. The graph is compiled with
 `interrupt_before=["human_review"]`, so when `synthesize` routes to `human_review`
-(any **CRITICAL** finding, or any score **< 0.5**) the graph **pauses** before that node
+(any **CRITICAL** finding or any score **< 0.5**) the graph **pauses** before that node
 and hands control to a human.
 
 ### Run the interactive audit
@@ -638,7 +747,7 @@ when `LANGCHAIN_API_KEY` is also present.
 Every LLM call in the graph is traceable. LangSmith auto-instruments the run from environment
 variables alone - no application code needed - so each audit produces a full node-by-node
 trace (`ingest → retrieve → plan → security/quality/test audits → synthesize → reflexion`),
-including the exact prompt, model, latency, token counts, and the Instructor-validated output
+including the exact prompt, model, latency, token counts and the Instructor-validated output
 for every Gemini call.
 
 Set these in your `.env`:
@@ -651,7 +760,7 @@ LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
 
 Then run any audit and view the trace:
 ```bash
-python main.py --test        # or --demo, or any real run
+python main.py --test        # or --demo or any real run
 ```
 Open **https://smith.langchain.com** → project **`langgraph-pr-audit-agent`**. Each run is one
 trace; drill into any node to see its prompt and structured output. This is what makes a

@@ -161,7 +161,7 @@ def main():
         from tests.test_integration import REAL_DIFF
         asyncio.run(_run_with_app(REAL_DIFF, args.large, args.durable))
     elif args.large:
-        # --large = the real pre-merge gate: audit the real diff, force compression, and in CI
+        # --large = the real pre-merge gate: audit the real diff, force compression and in CI
         # gate the build on findings vs the PR's human-approval state.
         asyncio.run(run_gate(large=True, durable=args.durable))
     else:

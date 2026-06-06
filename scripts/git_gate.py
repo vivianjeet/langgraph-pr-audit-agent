@@ -3,7 +3,7 @@ import os, subprocess
 
 def in_ci() -> bool:
     """True when running inside GitHub Actions (or any CI). Gates: no input() prompt, base
-    from env not stdin, no local fetch, and exit-code gating instead of interactive resume."""
+    from env not stdin, no local fetch and exit-code gating instead of interactive resume."""
     return bool(os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"))
 
 

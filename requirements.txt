@@ -21,6 +21,11 @@ pydantic==2.13.4
 tenacity==9.1.4
 python-dotenv==1.2.2
 
+# Compliance rule packs (scripts/seed_compliance.py loads packs/*.yaml). Declared directly
+# rather than relied on transitively via langchain-core - a clean install / CI must not break
+# if that transitive constraint ever changes.
+PyYAML==6.0.3
+
 # Observability (tracing + output-quality evaluators)
 langsmith==0.8.6
 

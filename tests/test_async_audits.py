@@ -36,7 +36,7 @@ def test_calls_actually_overlap():
     
 def test_concurrent_failure_rotates_exactly_once():
     """Three concurrent calls all hit a daily-exhausted KEY1. The lock + double-check must rotate
-    ONCE to KEY2 (not burn KEY3/KEY4), serve all three, and never run past the pool."""
+    ONCE to KEY2 (not burn KEY3/KEY4), serve all three and never run past the pool."""
     import asyncio
     from unittest.mock import patch
     import src.llm_retry as lr

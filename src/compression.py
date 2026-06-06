@@ -40,12 +40,13 @@ def compress_history(messages: list, compress_ratio: float = 0.5, min_keep: int 
 
     system_prompt = (
         "You compress an AI code-audit session transcript. Preserve, verbatim where possible: "
-        "decisions (approve/reject), security/quality/test scores, CRITICAL/HIGH findings, and "
+        "decisions (approve/reject), security/quality/test scores, CRITICAL/HIGH findings and "
         "file paths. Discard exploratory reasoning and failed tool output. Output 1 short paragraph."
     )
     messages_payload = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Transcript to compress:\n{transcript}"},
+        {"role": "user", "content": "Transcript to compress:\n{{transcript}}"
+                            .replace("{{transcript}}", transcript)},
     ]
     try:
         from pydantic import BaseModel, Field

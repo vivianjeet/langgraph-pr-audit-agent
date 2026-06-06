@@ -165,7 +165,7 @@ def _run_with_rotation(fn):
                 if _rotate_from(idx):        # rotate only if nobody else already did
                     continue                 # retry on the (possibly already-rotated) current key                # retry same request on the new key
                 raise QuotaExhaustedError(
-                    "All Gemini API keys are exhausted, key-blocked, or out of billing credits "
+                    "All Gemini API keys are exhausted, key-blocked or out of billing credits "
                     "(prepay depleted). Aborting to avoid a false-clean score. If it's billing, "
                     "top up the project at https://ai.studio/projects - retrying won't help."
                 ) from e
