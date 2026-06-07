@@ -1,9 +1,9 @@
 # LangGraph PR Audit Agent
 
-A multi-agent, stateful AI system that automates Pull Request security and quality audits. Framed for banking: every change touching payment logic, customer PII or auth gets reviewed before merge.
+A multi-agent, stateful AI system that automates Pull Request security and quality audits. Built for regulated codebases: every change touching payment logic, customer PII or auth gets reviewed before merge.
 
 ## What is this project?
-In a bank, a code change that touches auth or payment paths needs a security review before it merges. This agent does that review automatically.
+In a regulated codebase, a code change that touches auth or payment paths needs a security review before it merges. This agent does that review automatically.
 
 It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub PR diff, applying the **ReAct** (Reason + Act) pattern to check changes against OWASP Top 10, SQL injection, PII leaks and authentication bypasses.
 
@@ -26,7 +26,7 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 - **Model Context Protocol (`mcp`, `langchain-mcp-adapters`):** The agent is both an MCP **client** (it consumes tools over stdio) and an MCP **server** (`compliance-rag`) that any MCP client - Claude Desktop, a raw-SDK client - can call with zero glue.
 - **Multi-framework rule packs (`packs/*.yaml`):** Pluggable regulatory corpora (RBI, HIPAA, PCI-DSS, OWASP, GDPR) - adding a framework is dropping a YAML file, no code change. A finding cites the exact clause it breaks.
 
-**Reliability** - see [Reliability](#reliability-banking-grade-fail-closed)
+**Reliability** - see [Reliability](#reliability-fail-closed)
 - **Resilience layer (`src/llm_retry.py`, `tenacity`):** Centralized retry / server-directed backoff / multi-key rotation across every Gemini call, **thread-safe** under the concurrent fan-out, with fail-closed semantics. Classifies a 429 by its cause - per-minute throttle (wait the server's stated delay), per-day quota or depleted billing credits (rotate keys), blocked key (rotate immediately) - never one blunt retry policy.
 
 **Observability & ops**
@@ -79,13 +79,13 @@ graph TD
 ### Compliance grounding over MCP
 A finding is more useful when it cites the rule it breaks. The agent grounds its security findings in a real regulatory corpus, served and consumed over the **Model Context Protocol (MCP)**.
 
-The corpus is pluggable. Frameworks live in `packs/*.yaml` data files; RBI (banking), HIPAA (healthcare), PCI-DSS (cards), OWASP (app security) and GDPR (privacy) ship by default. Adding one is dropping a YAML file and re-running the idempotent seeder - no code change. The split that makes this work: `category` (security/quality/coverage, what the engine reasons over) is a typed enum with a DB `CHECK`, while `framework` is a free-form indexed tag, the axis the world keeps extending. The core stays small; the corpus stays open.
+The corpus is pluggable. Frameworks live in `packs/*.yaml` data files; RBI, HIPAA (healthcare), PCI-DSS (cards), OWASP (app security) and GDPR (privacy) ship by default. Adding one is dropping a YAML file and re-running the idempotent seeder - no code change. The split that makes this work: `category` (security/quality/coverage, what the engine reasons over) is a typed enum with a DB `CHECK`, while `framework` is a free-form indexed tag, the axis the world keeps extending. The core stays small; the corpus stays open.
 
 The agent is on both ends of the protocol. As a *client*, the `compliance` node connects via `MultiServerMCPClient` and calls `search_compliance_docs` over stdio. It fails soft - if the server can't start, or the diff isn't regulated, the audit carries on with empty context and a visible trace line instead of crashing or quietly reporting "clean". As a *server*, `src/mcp/compliance_rag_server.py` (`FastMCP`) exposes that same retrieval as a tool whose `@mcp.tool()` docstring *is* the schema the calling model reads. Anything that speaks MCP - Claude Desktop, a raw-SDK client - can call it with no glue, because the tool is a protocol endpoint rather than a Python import trapped in this process.
 
 When the diff is regulated, the retrieved passages go into the security-audit prompt and the model cites the clause directly. A planted SQL-injection diff produces a finding with a `Citations:` block quoting the *RBI Cyber Security Framework* and *OWASP A03:2021 - Injection*. On an unregulated diff the injection is empty, so there's no token cost when there's no rule to cite.
 
-For the audit trail, an in-prompt citation isn't enough - "the model says this breaks RBI" needs the exact clause, and a model can paraphrase or invent one. So the report carries a separate **Compliance audit trail**: the agent asks the model to quote, verbatim, the span each concern is grounded in, then verifies that span is a real substring of the passage it names and drops any that isn't. A confidently hallucinated citation in a compliance trail is worse than none, so the substring check is the trust boundary - every span that renders is a guaranteed-verbatim quote from a real passage, never a paraphrase the model drifted on. A hosted citations API would enforce that server-side; here it runs on the same Gemini spine as everything else (`src/citations.py`, `gemini-2.5-flash` - extraction, not reasoning), so there's no second provider or auth model. The result is a per-claim blockquote in the report:
+For the audit trail, an in-prompt citation isn't enough - a model can paraphrase or invent a clause. So the report carries a separate **Compliance audit trail**: the agent asks the model to quote each span verbatim, then verifies that span is a real substring of the passage it names and **drops any that isn't** - the substring check is the trust boundary, so every rendered span is a guaranteed-verbatim quote. It runs on the same Gemini spine (`src/citations.py`, `gemini-2.5-flash`), no second provider. The result is a per-claim blockquote in the report:
 
 ```markdown
 ### Compliance audit trail
@@ -101,7 +101,7 @@ python -m src.db.vectorstore        # creates the compliance_docs table + HNSW i
 python -m scripts.seed_compliance   # loads every packs/*.yaml (idempotent)
 ```
 
-### Reliability (banking-grade fail-closed)
+### Reliability (fail-closed)
 Every Gemini call routes through `src/llm_retry.py`, which:
 - Backs off on per-minute 429s **server-directed first**: it waits the delay the server asks
   for (`retryDelay`) when present and only falls back to exponential backoff
@@ -110,14 +110,9 @@ Every Gemini call routes through `src/llm_retry.py`, which:
   **rotates** `GEMINI_API_KEY → KEY2 → KEY3 → KEY4`.
 - Raises `QuotaExhaustedError` only when **all** keys are unusable - the graph then aborts
   and emits **no report** rather than a misleading "all clear".
-- **Rotation is concurrency-safe.** Because the three audits run at once, they can all hit a
-  dead key in the same instant and each try to rotate - which would skip past good keys
-  (`KEY1 → KEY2 → KEY3 → KEY4` for a single exhaustion). A `threading.Lock` plus a
-  *double-checked* rotation fixes this: under the lock a thread re-checks whether the key it
-  saw fail is still current; if another thread already rotated, it rides along instead of
-  rotating again, and clients are rebound inside the lock so a key and its client never
-  desync. The lock lives in the retry layer (the one door every Gemini call passes through),
-  not on the nodes.
+- **Rotation is concurrency-safe.** The three parallel audits can hit a dead key at the same
+  instant; a `threading.Lock` with a double-checked rotation in the retry layer stops them
+  from skipping past good keys (see [DESIGN.md](DESIGN.md) for the mechanism).
 - If an audit node degrades (transient API error), it records to `node_errors`; `synthesize`
   forces all scores to `0.0` when an audit actually failed, so a transport failure can never
   masquerade as a clean PR. **A failure is never a false pass.**
@@ -141,41 +136,23 @@ cognitive split so each kind of memory has a clear job:
 > `compress` node, which `finalize` promotes into the episodic store. See
 > [History compression](#history-compression-the-compress-node).
 
-**Persistent locally, ephemeral in CI.** The three persistent memory types live in Postgres, so how
-much the agent "remembers" depends on where it runs:
+**Persistent locally, ephemeral in CI.** The three persistent types live in Postgres. Locally the
+Docker pgvector container holds data across runs, so recall accumulates. In GitHub Actions the
+[pre-merge gate](#continuous-integration-audit-on-every-pr) uses a fresh pgvector service container
+per run, so a CI audit starts from an empty store and degrades gracefully (it never depends on
+history).
 
-- **Locally** the Docker pgvector container holds its data across runs, so semantic and episodic
-  recall accumulate - the agent genuinely learns from past audits over time.
-- **In GitHub Actions** the [pre-merge gate](#continuous-integration-audit-on-every-pr) spins up a
-  fresh pgvector **service container per run**, which is torn down when the job ends. So a CI audit
-  starts from an empty store with no prior records - recall simply finds nothing and the audit
-  degrades gracefully (it never depends on history). This is deliberate: the gate audits *this* PR's
-  diff, and a clean, reproducible per-run database is the right tradeoff for CI over a persistent one.
+The graph runs on a nested `AMSState`: an `audit` substate (the in-context `AuditState`) plus
+`semantic` / `episodic` / `procedural` channels as siblings, with a custom `merge_audit` reducer so
+the parallel audit fan-out doesn't clobber the substate. Embeddings are memoised per process
+(bounded LRU) so a diff embedded by several nodes costs one API call.
 
-The persistent three share one embed + pgvector spine. Procedural rules are *retrieved* by exact
-category lookup (not similarity), but each rule is **also embedded** - not for retrieval, but so the
-review tool can flag near-duplicate proposed rules by cosine similarity (see
-[Rule governance](#rule-governance-reviewing-what-the-agent-proposes)). Embeddings are memoised per
-process (`vectorstore.embed`, bounded LRU) so the same diff embedded by more than one node in a run
-costs a single API call.
-
-**The state *is* the memory system.** The graph runs on a nested `AMSState`: an `audit` substate
-(the in-context `AuditState`) plus `semantic` / `episodic` / `procedural` channels as siblings. The
-catch with nesting: LangGraph's reducers only apply to top-level channels, so a custom `merge_audit`
-reducer restores the per-field accumulation the audit substate needs - without it the parallel audit
-fan-out (security/quality/coverage all write at once) would silently clobber each other's messages.
-
-**All four types feed the audit, not just store data.** Memory is recalled once per run (in
-`retrieve`) into the shared channels, then consumed where it's useful:
+Memory is recalled once per run (in `retrieve`) into the shared channels, then consumed where useful:
 
 - **Semantic + episodic** precedent flows into the **plan** node, which uses "have we seen a change
   like this before?" to steer triage (focus areas, audit depth).
 - **Procedural** rules are injected **verbatim** into each audit node's prompt, per domain - the
-  security auditor sees the security rules, quality sees quality rules, coverage sees coverage rules
-  - so a standing org rule is enforced to the letter, not just paraphrased into a focus area.
-
-This closes the loop: retrieved context actually changes the audit, rather than being stored and
-ignored.
+  security auditor sees the security rules, quality sees quality rules, coverage sees coverage rules.
 
 ### Rules have a lifecycle (and the agent can propose its own)
 
@@ -198,19 +175,19 @@ audit. So the agent *proposes*; a human *approves*. Only `seeded` and `learned_a
 reach a prompt.
 
 Each proposed rule also records the **human's verdict on the PR it was learned from**
-(`source_decision`: approve / reject / needs-changes). Learning is *not* gated by that verdict - a
-rejected PR still proposes rules - but the reviewer sees the provenance ("learned from a PR the human
-rejected") and weighs it when approving. The PR decision informs the rule decision; it does not make
-it.
+(`source_decision`). That verdict **gates** learning: a PR the human sent back (`needs-changes`) or
+turned down (`reject`) proposes **no** rules at all - findings on code that is being revised or
+abandoned should not become standing rules. Only an approved PR (or one that never needed review)
+proposes rules, and even then they sit `learned_pending` until a human approves them. The PR's
+audit record and episode are still stored on every verdict (a deferral is honest precedent); only
+the rule *learning* is suppressed.
 
 ---
 
 ## Rule governance (reviewing what the agent proposes)
 
-Proposed rules sit inactive until a human approves them. That review happens in a standalone
-terminal tool - **not** during an audit - because rule governance is out-of-band store maintenance:
-learning happens at the end of a run (after the in-graph human pause), and rules proposed on clean
-runs never hit that pause, so they need their own review surface.
+Proposed rules sit inactive until a human approves them, in a standalone terminal tool (rule
+governance is out-of-band store maintenance, separate from an audit run):
 
 ```bash
 python -m scripts.review_rules
@@ -236,14 +213,10 @@ reworded re-learns. You answer per rule:
 | `delete <id>` | **hard-remove** | deletes the row entirely; for a *learned* rule the tool warns first, because the same finding will be re-proposed on the next matching audit |
 | `done` | finish | exit the tool |
 
-> **Approving everything quickly:** there is no bulk "approve all" - approval is deliberately per
-> rule, since each is a standing policy the agent will enforce verbatim on every future PR. Press `a`
-> for each rule you want active. (Seed *trusted* baseline policy instead via `scripts/seed_rules.py`,
-> which writes rules as `seeded` - active immediately, no review needed.)
-
-> The similarity hint is **advisory only**: cosine similarity is a rough proxy for "duplicate", not
-> proof, and the threshold is untuned. The tool shows the score and you decide - it never
-> auto-removes a rule. The human approval gate is the real deduplicator.
+> Approval is per rule (no bulk "approve all"), since each becomes a standing policy enforced verbatim
+> on every future PR. Seed *trusted* baseline policy directly via `scripts/seed_rules.py` (written as
+> `seeded` - active immediately, no review). The similarity hint is advisory only (untuned threshold);
+> the human approval gate is the real deduplicator.
 
 ---
 
@@ -253,8 +226,8 @@ The audit's external tools are exposed and consumed over the Model Context Proto
 in-process Python wrappers. That one decision is what makes the compliance RAG reusable by anything
 that speaks MCP.
 
-**As a client.** The agent connects to MCP servers via `MultiServerMCPClient` - a read-only
-filesystem server (repo context) and the compliance-rag server below. A `compliance` node runs
+**As a client.** The agent connects to the compliance-rag server below via `MultiServerMCPClient`.
+A `compliance` node runs
 between retrieval and planning: it triages whether a diff touches regulated concerns (personal data,
 payment-card data, health data, auth, money movement, audit logging) and, if so, calls
 `search_compliance_docs` to ground the audit in the actual regulatory clauses before the plan is
@@ -262,7 +235,7 @@ drawn up. A diff that isn't regulated skips the lookup entirely - no wasted call
 
 **Multi-framework, plug-and-play.** The compliance corpus is not tied to one industry. Each
 regulation is a rule pack - a `packs/<framework>.yaml` data file - loaded into the store at seed
-time. RBI (banking), HIPAA (healthcare), PCI-DSS (payments), OWASP (application security), and
+time. RBI, HIPAA (healthcare), PCI-DSS (payments), OWASP (application security), and
 GDPR/DPDP (privacy) ship by default; adding another (SOX, FedRAMP, ...) is dropping a YAML file, no
 code change. `category` (security/quality/coverage) is a typed enum the engine reasons over;
 `framework` is an open tag, so contributors extend the breadth without touching the core.
@@ -354,10 +327,9 @@ node folds the **oldest ~50%** of the message history into a single summary that
 signal (decisions, scores, CRITICAL/HIGH findings, file paths) and discards exploratory chatter,
 keeping the newest messages verbatim.
 
-It sits at a single choke point: **both** paths into `finalize` (the clean path and the
-post-`human_review` path) route through `compress`, so finalize always sees a consistent state. When
-compression doesn't fire, the node is a **pass-through** - it returns nothing and the graph flows on
-untouched - so a normal short audit pays nothing for it.
+Both paths into `finalize` (the clean path and the post-`human_review` path) route through
+`compress`, so finalize always sees a consistent state. When compression doesn't fire, the node is a
+**pass-through** and a normal short audit pays nothing for it.
 
 **Two triggers (an OR gate):**
 
@@ -366,21 +338,12 @@ untouched - so a normal short audit pays nothing for it.
 | **auto** | `should_compress` at 80% of a token budget | the session genuinely approached the limit |
 | **force** | the `--large` flag, threaded into state as `force_compress` | compress regardless of size (demo / explicit) |
 
-**Where the result goes.** The working transcript (`audit.messages`) is **append-only by design** -
-its reducer protects the parallel audit fan-out from clobbering itself - so compression cannot
-overwrite it. Instead the compacted history is written to its own `compressed` channel
-(last-writer-wins). This is also conceptually correct: a compressed session *is* proto-episodic
-memory, so `finalize` stores it as the session **episode** when present (falling back to a structured
-findings summary otherwise). That closes a loop - a compressed session this run becomes precedent a
-future run can recall.
-
-**Resilience.** The summary is produced by `gemini-2.5-flash`; if the model is unavailable, a no-LLM
-fallback keeps only the signal lines (decision/plan/findings prefixes) so compression still happens
-and never loses the important content. `QuotaExhaustedError` propagates (same fail-closed rule as the
-audit nodes).
-
-> Like the budget manager below, the compression mechanism is generic - it operates on a plain list
-> of stringifiable messages and knows nothing about `AuditState`.
+The compacted history is written to its own `compressed` channel (the working transcript is
+append-only, so compression can't overwrite it). `finalize` stores it as the session **episode** when
+present, falling back to a structured findings summary otherwise - so a compressed session this run
+becomes precedent a future run can recall. If the summariser model (`gemini-2.5-flash`) is
+unavailable, a no-LLM fallback keeps only the signal lines (decision/plan/findings) so compression
+never loses important content; `QuotaExhaustedError` propagates (fail-closed, like the audit nodes).
 
 ---
 
@@ -427,31 +390,11 @@ real tokenizer when you want precision:
 TokenBudgetManager(budget_tokens=8000, counter=my_real_tokenizer)
 ```
 
-### Plug-and-play: using it for very large (1M+ token) PR diffs
-
-This repo does **not** route the live audit through the budget manager, and that is deliberate: a
-single PR diff is far smaller than Gemini's ~1M-token window, so an in-band budget check here would
-always keep everything, trim nothing and only add latency. The class and its tests are the artifact;
-it is demonstrated under synthetic oversized load in `tests/test_token_budget.py`.
-
-If you are cloning this to handle genuinely huge diffs, the budget manager is the **last** mile, not
-the whole fix. A diff larger than the model window breaks in three places, in this order:
-
-1. **Embedding (breaks first).** `retrieve` and `finalize` embed the diff for similarity search and
-   storage, and embedding models have a much smaller input limit than the chat window. You cannot fix
-   this by trimming the text before embedding - a trimmed embedding represents a *different* text than
-   the real diff, so similarity search returns wrong results. The fix is **chunked ingestion +
-   retrieval** (split the diff per file/hunk, embed each chunk, retrieve the relevant ones).
-2. **Parsing.** `parse_github_diff` (`src/nodes/ingest.py`) keeps every added/removed line, so a huge
-   diff stays huge after parsing. You need a pre-reduction step (per-file summaries or changed-hunk
-   headers).
-3. **Prompt assembly (the budget manager's job).** Once the pieces are reasonably sized, route the
-   prompt assembly in `plan.py` (and the audit nodes) through `TokenBudgetManager.fit(...)` instead of
-   concatenating the diff and precedent directly, then set `budget_tokens` to your model's real window
-   and (optionally) pass a real `counter`.
-
-In short: handling a 1M+ diff is primarily a chunking/RAG problem (steps 1-2); the budget manager
-cleanly handles the final fit (step 3) and is built to drop into that pipeline unchanged.
+The budget manager is **not** wired into the live audit (a single PR diff is far below the model
+window, so it would trim nothing). It is built and tested under synthetic load in
+`tests/test_token_budget.py`, ready to drop in for genuinely large diffs - see
+[DESIGN.md](DESIGN.md#handling-very-large-1m-token-pr-diffs) for how to extend the pipeline to
+handle 1M+ token inputs.
 
 ---
 
@@ -543,6 +486,30 @@ It times the run; per-call token counts are in the LangSmith trace (see below).
 python -m scripts.bench_audit     # live LLM calls (one full audit per run) - keep the run count modest
 ```
 
+### Representative audit results
+`scripts/integration_pass.py` runs five representative diffs end to end against live Gemini and the
+compliance corpus. A recent pass:
+
+| PR        | secs | security findings | compliance hits | citations | escalated | security score |
+| --------- | ---- | ----------------- | --------------- | --------- | --------- | -------------- |
+| sqli      | 37.0 | 1                 | 2               | 1         | yes       | 0.40           |
+| pii       | 37.3 | 1                 | 7               | 1         | yes       | 0.40           |
+| auth      | 51.0 | 1                 | 0               | 0         | yes       | 0.40           |
+| clean     | 15.8 | 0                 | 0               | 0         | no        | 1.00           |
+| quality   | 27.2 | 0                 | 0               | 0         | yes       | 1.00           |
+
+How to read it:
+- **sqli / pii / auth** carry a real CRITICAL security issue: each escalates and pauses for human review,
+  and the regulated ones (sqli, pii) ground findings in compliance passages with verified citations.
+- **clean** (a pure rename) passes with a perfect score and no escalation - a benign change is not flagged.
+- **quality** (a god-object) has no security issue (score 1.00) but its *quality* score drops on the
+  pile of maintainability findings, so it escalates on that dimension. Scores are multiplicative, so
+  several moderate findings trend low with diminishing returns rather than collapsing straight to zero
+  - severity drives the risk, not raw finding count.
+
+Latency is dominated by the live Gemini calls (the three audit dimensions plus planning and compliance);
+times vary with rate-limit backoff. Numbers are illustrative of one run, not a fixed benchmark.
+
 ---
 
 ## Human-in-the-Loop (pause  inject  resume)
@@ -571,7 +538,20 @@ The audit nodes are `async`, so the graph is driven through LangGraph's async AP
    checkpoint (nested under `audit` so the `merge_audit` reducer applies it to the substate).
 4. **Resume** - `app.astream(None, config=config)` continues from the interrupt
    (`None` = "no new input, keep going"). The graph runs `human_review → finalize`, and the
-   decision is stamped onto the final report.
+   verdict drives the outcome.
+
+The verdict is not just a label - it changes what `finalize` does:
+
+| Verdict | Report status | Rule learning | CI exit |
+| ------- | ------------- | ------------- | ------- |
+| `approve` (or never escalated) | `passed` | learns | 0 (unblocked) |
+| `needs-changes` | `changes-required` | **suppressed** | 1 (blocked) |
+| `reject` | `rejected` | **suppressed** | 1 (blocked) |
+
+There is **no separate graph branch** per verdict: a `needs-changes` PR is revised by its author and
+re-audited on the *next* run (against new commits), not looped in-graph - so all three verdicts take
+the same `human_review → finalize` path and the difference lives in the report status and the
+learning gate. The audit record and episode are stored on every verdict; only learning is suppressed.
 
 > Because the run is frozen in a checkpointer keyed on `thread_id`, the pause can span a human
 > coffee break without losing the in-flight audit. By default that checkpoint lives in memory, so it
@@ -681,13 +661,16 @@ There is no terminal in CI, so the interactive prompt is replaced by an **exit-c
 
 1. On a PR, the `gate` job runs `python main.py --large` against the PR's diff (base branch comes
    from `GITHUB_BASE_REF` automatically - no prompt).
-2. If the audit **escalates** to human review (a CRITICAL finding or score < 0.5) and **no human has
-   approved the PR yet**, the job **exits 1** - the required check fails and the merge is blocked.
-3. A reviewer clicks **Approve** in the GitHub PR UI. GitHub re-triggers the workflow; this time the
-   gate reads the PR's review state (via `gh`, authenticated by the auto-injected `GITHUB_TOKEN`),
-   sees the approval, and **exits 0** - the merge is unblocked.
+2. If the audit **escalates** to human review (a CRITICAL finding or score < 0.5) and the PR has
+   **no review verdict yet**, the job **exits 1** - the required check fails and the merge is blocked.
+3. A reviewer acts in the GitHub PR UI. GitHub re-triggers the workflow; the gate reads the PR's
+   latest review state (via `gh`, authenticated by the auto-injected `GITHUB_TOKEN`) and maps it to
+   the *same* verdict the local prompt uses: **Approve → `approve`** (resumes, exits 0, unblocked);
+   **Request changes → `needs-changes`** (resumes through `finalize`, exits 1, stays blocked).
 
-So the "human in the loop" is the PR reviewer acting asynchronously in GitHub, and the pause lives in
+So the GitHub review verdict drives the **same** finalize branch the local `approve/needs-changes`
+prompt drives - the CLI and CI surfaces are one code path, differing only in where the verdict comes
+from. The "human in the loop" is the PR reviewer acting asynchronously in GitHub; the pause lives in
 GitHub's state, not a blocked process. Interactive `input()` HITL stays a local-only experience.
 
 ### What to configure in GitHub (one-time)
@@ -769,9 +752,8 @@ multi-step agent debuggable - when a score looks wrong you can see *which* node 
 
 > **Why LangSmith here, and not a second backend?** LangSmith covers both tracing *and* the
 > output-quality evaluators below, so it earns its place. A self-hostable backend (Langfuse) is
-> deferred to the dedicated LLMOps week, where the "zero data egress / regulated banking" story
-> is built properly as its own self-hosted Docker stack - rather than bolting a redundant second
-> tracer onto this repo.
+> deferred to a dedicated self-hosted Docker stack, where the "zero data egress / regulated
+> deployment" story is built properly - rather than bolting a redundant second tracer onto this repo.
 >
 > Tracing is **optional and additive**: with no `LANGCHAIN_*` vars set, the pipeline runs
 > identically, just untraced.
@@ -797,45 +779,7 @@ python -m src.evaluators
 
 ---
 
-## Why these design decisions
+## Design notes
 
-The sections above describe *what* the system does; this one collects the *why* in one place. Each
-choice is a deliberate trade-off, not an accident of how it grew.
-
-**Why four memory types instead of one vector store?** Different recall needs different mechanisms.
-Precedent ("have we seen a PR like this?") and past sessions need *similarity* search; org rules need
-*exact* category lookup, not a fuzzy match. Collapsing them into one store would force similarity
-semantics onto rules that must apply verbatim. So semantic and episodic use pgvector; procedural is a
-plain keyed table. See [Agent Memory](#agent-memory-four-types-one-system).
-
-**Why is learned-rule activation gated by a human?** Rules derived from the agent's own findings are a
-feedback loop - one false-positive CRITICAL would otherwise become a permanent rule injected into
-every future audit, with nothing to un-learn it. Learned rules land as `learned_pending` and never
-inject until a human approves them. The agent proposes; a human decides.
-
-**Why does compression write to its own channel instead of editing the transcript?** The working
-message list is append-only by reducer design - that reducer is what protects the parallel audit
-fan-out from clobbering itself - so compression *cannot* overwrite it. The compacted history goes to a
-separate channel, which is also conceptually right: a compressed session is proto-episodic memory, so
-`finalize` promotes it into the episodic store. See
-[History compression](#history-compression-the-compress-node).
-
-**Why is the budget manager not wired into the live audit?** A single PR diff is far below the model's
-window, so an in-band budget check would trim nothing and only add latency. It is built and tested
-under synthetic load, ready for genuinely large inputs - wiring it now would be cost with no benefit.
-See [Context budgeting](#context-budgeting-tokenbudgetmanager).
-
-**Why fail closed?** A transport or auth failure that left scores at a default 1.0 would let a broken
-audit look like a clean PR. Instead, when an audit node errors the scores are forced to 0.0 and the
-run escalates - a failure is never a false pass.
-
-**Why async audits but synchronous everything else?** Only the three audits run on the same parallel
-step, so only they benefit from concurrency. The blocking Gemini call runs on a worker thread, reusing
-the existing retry / key-rotation stack rather than reimplementing it against an async client.
-
-**Why structured outputs everywhere (Instructor) and no manual JSON parsing?** Every LLM node returns
-a Pydantic `response_model` through one call path (`call_gemini` / `call_gemini_async`), so there is
-no hand-rolled `json.loads` of model output anywhere in `src/` - the only `json` use is JSONB column
-serialization in the DB layer. Each output field carries a `Field(description=...)`, which Instructor
-puts into the schema sent to the model; that is what actually moves output quality, not "using
-Instructor" as a label.
+The trade-offs behind these choices - and how to extend the agent for very large (1M+ token) diffs -
+are written up separately in [DESIGN.md](DESIGN.md).
