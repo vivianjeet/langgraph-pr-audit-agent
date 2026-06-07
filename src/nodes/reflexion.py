@@ -1,6 +1,7 @@
 # Reflection : a SMARTER model critiques the audit and decides if a second pass is warranted
 from pydantic import BaseModel, Field
-from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.llm_retry import QuotaExhaustedError
+from src.llm_client import llm
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.state import REFLEXION_SIGNAL_PREFIXES as RELEVANT_PREFIXES
 import src.config as cfg
@@ -76,9 +77,9 @@ def reflexion_node(state: AMSState):
             {"role" : "user", "content" : user_prompt}
         ]
     try:
-        critique = call_gemini(model=cfg.GEMINI_PRO_MODEL, messages=messages,
+        critique = llm.call(tier="powerful", messages=messages,
                                response_model=ReflectionOutput,
-                               max_output_tokens=cfg.REFLEXION_MAX_OUTPUT_TOKENS)
+                               max_output_tokens=cfg.REFLEXION_MAX_OUTPUT_TOKENS).output
     except QuotaExhaustedError:
         raise
     except Exception as e:

@@ -8,10 +8,11 @@ WHAT IS PINNED
 - test_coverage_audit_injects_rules_into_prompt: a rule reaches the coverage node's prompt.
 
 HOW IT WORKS (no DB, no LLM)
-- `call_gemini_async` patched with an async spy that captures the system message and returns a
-  minimal valid <Domain>AuditOutput so the node completes.
+- `audit_with_diff_cache` patched with an async spy that captures the `instructions` it receives
+  (the rendered system prompt, the per-node variable part) and returns a minimal valid
+  <Domain>AuditOutput + empty cache-note so the node completes.
 - `AMS.rules_block` patched to return a sentinel block, so the test asserts the WIRING
-  ({{rules}} .replace into the system prompt), independent of channel keys/contents.
+  ({{rules}} .replace into the instructions), independent of channel keys/contents.
 
 WHY this is symmetric with security
 - Which node enforces which rule is a property of the rule's CATEGORY, not a privileged
@@ -26,32 +27,32 @@ import src.nodes.coverage_audit as cov_mod
 def test_quality_audit_injects_rules_into_prompt():
     captured = {}
 
-    async def _fake(model, messages, response_model, max_output_tokens):
-        captured["system"] = next(m["content"] for m in messages if m["role"] == "system")
-        return qual_mod.QualityAuditOutput(reasoning="ok", findings=[])
+    async def _fake(diff, instructions, response_model, max_output_tokens, **kw):
+        captured["instructions"] = instructions
+        return qual_mod.QualityAuditOutput(reasoning="ok", findings=[]), ""
 
-    with patch.object(qual_mod, "call_gemini_async", side_effect=_fake), \
+    with patch.object(qual_mod, "audit_with_diff_cache", side_effect=_fake), \
          patch("src.nodes.quality_audit.AMS.rules_block",
                return_value="RULE-SENTINEL: no god objects\n\n"):
         asyncio.run(qual_mod.quality_audit_node({
             "audit": {"parsed_diff": "diff --git a/x.py b/x.py\n+x",
                       "audit_plan": {"focus_areas": []}},
         }))
-    assert "RULE-SENTINEL" in captured["system"]
+    assert "RULE-SENTINEL" in captured["instructions"]
 
 
 def test_coverage_audit_injects_rules_into_prompt():
     captured = {}
 
-    async def _fake(model, messages, response_model, max_output_tokens):
-        captured["system"] = next(m["content"] for m in messages if m["role"] == "system")
-        return cov_mod.CoverageAuditOutput(reasoning="ok", findings=[])
+    async def _fake(diff, instructions, response_model, max_output_tokens, **kw):
+        captured["instructions"] = instructions
+        return cov_mod.CoverageAuditOutput(reasoning="ok", findings=[]), ""
 
-    with patch.object(cov_mod, "call_gemini_async", side_effect=_fake), \
+    with patch.object(cov_mod, "audit_with_diff_cache", side_effect=_fake), \
          patch("src.nodes.coverage_audit.AMS.rules_block",
                return_value="RULE-SENTINEL: new fn needs a test\n\n"):
         asyncio.run(cov_mod.coverage_audit_node({
             "audit": {"parsed_diff": "diff --git a/x.py b/x.py\n+x",
                       "audit_plan": {"focus_areas": []}},
         }))
-    assert "RULE-SENTINEL" in captured["system"]
+    assert "RULE-SENTINEL" in captured["instructions"]

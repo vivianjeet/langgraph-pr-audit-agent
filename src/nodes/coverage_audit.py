@@ -1,8 +1,9 @@
 # Test-coverage auditor: flags missing/weak tests for changed code (ReAct + Instructor)
 from pydantic import BaseModel, Field
 from src.state import CoverageFinding, RuleCategory
-from src.llm_retry import call_gemini_async, QuotaExhaustedError
+from src.llm_retry import QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
+from src.llm_client import audit_with_diff_cache
 import src.config as cfg
 
 class CoverageAuditOutput(BaseModel):
@@ -61,20 +62,12 @@ async def coverage_audit_node(state: AMSState):
         "If every changed path is adequately tested, return an EMPTY findings list. Do not invent gaps.\n\n"
 
     )
-    user_prompt = (
-        "Code diff to analyze:\n"
-        "{{diff}}"
-    )
-    messages=[
-            {"role":"system","content":system_prompt
-                .replace("{{focus}}",focus)
-                .replace("{{rules}}", rules_block)},
-            {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
-        ]
+    # Instructions = the rendered system prompt (per-node VARIABLE part); the diff is cached and shared
+    # across the fan-out nodes - see audit_with_diff_cache. Falls back to plain Flash internally.
+    instructions = system_prompt.replace("{{focus}}", focus).replace("{{rules}}", rules_block)
     try:
-        response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL, messages=messages,
-                               response_model=CoverageAuditOutput,
-                               max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+        response, cache_note = await audit_with_diff_cache(
+            parsed_diff, instructions, CoverageAuditOutput, cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:
@@ -86,6 +79,7 @@ async def coverage_audit_node(state: AMSState):
 
     new_message = (
         "System: Test audit completed. \n"
+        f"{cache_note}"
         f"Reasoning: {response.reasoning}\n"
         f"Found {len(response.findings)} gaps\n"
     )

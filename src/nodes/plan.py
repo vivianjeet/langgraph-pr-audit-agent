@@ -1,6 +1,7 @@
 from src.state import AuditPlan, Severity, RuleCategory
 from pydantic import BaseModel, Field
-from src.llm_retry import call_gemini, QuotaExhaustedError
+from src.llm_retry import QuotaExhaustedError
+from src.llm_client import audit_with_diff_cache_sync
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.text_utils import clip as _clip
 import src.config as cfg
@@ -67,22 +68,17 @@ def plan_audit_node(state: AMSState):
         "else 'shallow' \n"
         "- files_to_prioritize: subset of the changed files most likely to carry risk\n\n"
     )
-    user_prompt = (
-        "Changed files: {{files}}\n"
-        "Diff: {{diff}}\n"
-        "{{precedent}}"
+    # The diff is the cached part (shared with compliance/quality/coverage); the variable part is this
+    # node's instructions + the changed-files list + any precedent. Reuses the handle compliance primed.
+    instructions = (
+        system_prompt
+        + "Changed files: " + str(files) + "\n"
+        + precedent_block
+        + "\nThe code diff is provided in context."
     )
-    messages = [
-            {"role":"system","content":system_prompt},
-            {"role":"user","content": user_prompt
-                .replace("{{files}}", str(files))
-                .replace("{{diff}}", parsed_diff)
-                .replace("{{precedent}}", precedent_block)}
-        ]
     try:
-        response: PlanAuditOutput = call_gemini(model=cfg.GEMINI_FLASH_MODEL,messages = messages,
-                                                response_model=PlanAuditOutput,
-                                                max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+        response, _ = audit_with_diff_cache_sync(
+            parsed_diff, instructions, PlanAuditOutput, cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:
