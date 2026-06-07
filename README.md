@@ -14,8 +14,8 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 - **Python 3.12+ / asyncio:** The three audits are `async` nodes that run **concurrently** - their Gemini calls overlap on worker threads (`asyncio.to_thread`) instead of running in series.
 
 **LLM & structured output**
-- **Gemini 2.5 Flash (audits) + Gemini 2.5 Pro (reflexion):** Core LLM reasoning engine (via `google-genai`).
-- **Model-tier router + context caching:** Nodes pick a model by *tier* through one router (`UnifiedLLMClient`); the shared diff is cached once per audit and reused across the Flash nodes (~74% input-cost cut on a large diff, verified live). See [Model tiers & context caching](#model-tiers--context-caching).
+- **Gemini 2.5 Flash + Gemini 2.5 Pro (via `google-genai`):** Flash drives the triage/quality/coverage/compliance work; Pro the deeper reasoning (reflexion and the security audit's cache path). Nodes pick by *tier*, not by name - see below.
+- **Model-tier router + context caching:** One router (`UnifiedLLMClient`) maps a tier to a model and keeps the retry/rotation/fail-closed contract; the shared diff is cached once per audit and reused across the Flash nodes (~74% input-cost cut on a large diff, verified live). See [Model tiers & context caching](#model-tiers--context-caching).
 - **Instructor:** Enforces strict structured outputs (Pydantic V2 schemas) - no hand-rolled JSON parsing.
 
 **Memory & retrieval** - see [Agent Memory](#agent-memory-four-types-one-system)
@@ -123,11 +123,25 @@ Every Gemini call routes through `src/llm_retry.py`, which:
 ## Model tiers & context caching
 
 Every node selects its model by **tier**, not by a hard-coded name, through one router
-(`UnifiedLLMClient` in `src/llm_client.py`): `balanced` → Gemini 2.5 Flash, `powerful` → Gemini 2.5
-Pro. The router sits on the same retry/rotation spine, records which tier actually served each call,
-and on a total quota exhaustion re-raises `QuotaExhaustedError` as itself so the fail-closed contract
-survives the abstraction. Sequential nodes call `llm.call(...)` (sync); the parallel fan-out calls
+(`UnifiedLLMClient` in `src/llm_client.py`):
+
+| Tier | Model | Used for |
+|------|-------|----------|
+| `fast` | Gemini 2.5 Flash-Lite | the cheapest path / fallback floor |
+| `balanced` | Gemini 2.5 Flash | triage, plan, the quality/coverage audits, compliance |
+| `powerful` | Gemini 2.5 Pro | reflexion and the security audit's cache path |
+| `cite` | Gemini 2.5 Flash | the verbatim-citation extraction |
+
+A tier that isn't pinned falls back down the chain (`balanced → fast`) on an exhausted model. The
+router sits on the same retry/rotation spine, records which tier actually served each call, and on a
+total quota exhaustion re-raises `QuotaExhaustedError` as itself so the fail-closed contract survives
+the abstraction. Sequential nodes call `llm.call(...)` (sync); the parallel fan-out calls
 `llm.acall(...)` (async) - same tier table, same fallback, the split is only about the event loop.
+
+The model names themselves, the token ceilings, the score thresholds and every other tunable live in
+one place - `src/config.py` - imported as `cfg` wherever they're read, so the tier table composes its
+models from config rather than hard-coding strings. Changing a model is a one-line edit there, and
+nothing downstream drifts.
 
 ### Caching the diff (per-PR)
 
@@ -140,22 +154,54 @@ reusers - there's no create-race. The four share one handle because they share o
 
 There's a floor on when this is worth it. A repeat read is billed at ~25% of the input rate, so the
 saving scales with how many tokens get *reused*, and Gemini rejects any cache under **2,048 tokens**.
-Below that the node just falls back to a plain Flash call - no cache, no penalty, and the caller
+Below that the node just falls back to a plain Flash call - no cache, no penalty and the caller
 never has to branch. The diff clears the floor on large PRs, which is exactly where you want the
-saving. Measured on a 3,000-token diff at the published Pro rate ($1.25/1M input, cached
-reads at 25%), reusing the diff cut the **input cost ~74%** on each reusing node, verified live via
+saving. Measured on a 3,000-token diff at the published Flash rate ($0.30/1M input, cached
+reads at 25%), reusing the diff cut the **input cost ~74%** on each reusing node - the ratio is rate-
+independent because a cache read is billed at 25% of the input rate either way. Verified live via
 `cached_content_token_count > 0` on the repeat call - the claim is never made without that field
 proving the cache actually engaged.
 
 ### Caching the prefix (cross-PR, for batch)
 
-`security_audit` caches the *opposite* axis: its stable system **prefix** (instructions + rules +
-compliance), which is byte-identical across *different* PRs of the same corpus. That's the cross-PR
-optimization - it pays when many PRs are audited inside the 5-minute cache window (batch runs, a busy
-review queue), not on a single audit. Security runs on Pro, so it can't share the Flash diff-handle
-regardless. Today the prefix is usually under the 2,048-token floor, so this path falls back to Flash
-until the rule/compliance corpus grows past it - a deliberate, documented forward-looking path rather
-than a live saving.
+The security audit takes this path **only on a regulated diff** - when the compliance node found
+matching passages, it runs on Pro (`tier="powerful"`) and caches its stable system **prefix**
+(instructions + rules + compliance), which is byte-identical across *different* PRs of the same corpus.
+That's the cross-PR optimization - it pays when many PRs are audited inside the 5-minute cache window
+(batch runs, a busy review queue), not on a single audit. On its Pro path security can't share the
+Flash diff-handle regardless, since a `CachedContent` is model-bound. An *unregulated* diff has no
+compliance context, so the security audit skips this path and runs on plain Flash like the other audit
+nodes. Today the prefix is usually under the 2,048-token floor too, so even the regulated path falls
+back to a plain Flash call until the rule/compliance corpus grows past it - a deliberate, documented
+forward-looking path rather than a live saving.
+
+### Tool-choice modes (forcing a call vs letting the model decide)
+
+When a node offers the model a tool, Gemini's `FunctionCallingConfig.mode` controls *whether* the model
+is allowed to skip the call. The choice is not cosmetic - it changes the output-token cost:
+
+| Mode | `mode` / `allowed_function_names` | Behaviour |
+|------|----------------------------------|-----------|
+| **auto** | `AUTO` | the model decides whether to call - it spends tokens reasoning "should I call a tool?" |
+| **any** | `ANY` | the model **must** call at least one tool, but still chooses which |
+| **tool** | `ANY` + one allowed name | **forced extraction** - the model emits that one call's arguments with no decision preamble |
+| **parallel** | `AUTO`, two tools offered | the model may emit **both** calls in one turn (one round-trip instead of two) |
+
+`scripts/tool_choice_bench.py` measures all four on a fixed diff so the token deltas are real numbers,
+not a claim. Forcing a specific tool (`tool`) is the cheapest: it skips both the "should I?" and the
+"which one?" reasoning. `parallel` is the latency win - a diff that needs two lookups does one
+round-trip rather than two.
+
+```bash
+python -m scripts.tool_choice_bench   # live; prints inTok / outTok / #calls per mode
+```
+
+The audit applies this lesson without a rewrite. The forced-extraction case is exactly the
+compliance/plan/audit nodes' structured output, and **Instructor already forces it** on the Gemini
+spine: a `response_model` makes the call mandatory *and* retries on a validation failure, which is
+strictly stronger than raw `tool_config`. So Instructor stays the path for the pydantic schemas; the
+benchmark is the measured evidence for why, and the `parallel` insight is held for the case where a
+single diff genuinely needs both MCP tools in one turn.
 
 ---
 
@@ -474,7 +520,9 @@ python -m src.db.vectorstore      # create the tables + HNSW index (idempotent, 
 python -m scripts.seed_rules      # load baseline org rules (idempotent; re-run adds only new ones)
 ```
 `docker compose up -d` only starts an empty Postgres. The second command creates the
-`vector` extension and the three tables the agent reads/writes. It is idempotent
+`vector` extension and the four tables the agent reads/writes (the three memory tables -
+`pr_audits`, `session_episodes`, `procedural_rules` - plus `compliance_docs` for the MCP
+corpus). It is idempotent
 (`CREATE TABLE IF NOT EXISTS`), so re-running it is harmless. The third loads the baseline
 org rules the audit enforces - without it the procedural-rules table is empty and that check
 is a no-op. It dedups, so editing the rule list and re-running only inserts what's new.
@@ -520,8 +568,9 @@ python main.py --test
 
 ### Measure audit latency
 `scripts/bench_audit.py` runs the full audit on a fixed diff several times and reports min / median /
-max wall-clock latency - a baseline to compare against once provider routing and prompt caching land.
-It times the run; per-call token counts are in the LangSmith trace (see below).
+max wall-clock latency - a baseline for measuring the effect of the model-tier routing and diff
+caching that are now in place. It times the run; per-call token counts are in the LangSmith trace
+(see below).
 ```bash
 python -m scripts.bench_audit     # live LLM calls (one full audit per run) - keep the run count modest
 ```
