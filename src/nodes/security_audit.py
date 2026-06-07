@@ -5,6 +5,7 @@ from src.state import SecurityFinding, RuleCategory
 from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
 import src.config as cfg
+from src.llm_client import llm, cached_system
 
 class SecurityAuditOutput(BaseModel):
     reasoning: str = Field(
@@ -91,22 +92,54 @@ async def security_audit_node(state: AMSState):
             .replace("{{compliance}}", compliance_block)},
         {"role": "user", "content": user_prompt.replace("{{diff}}",parsed_diff)},
     ]
-    try:
-        response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,messages=messages,
+
+    cache_note = ""
+    if compliance:
+        # Security caches the PREFIX (instructions+rules+compliance), NOT the diff - the opposite axis
+        # from the other Flash nodes (which cache the diff via audit_with_diff_cache). The prefix is
+        # byte-identical across DIFFERENT PRs of the same corpus, so this is the CROSS-PR / batch
+        # optimization: it pays when many PRs are audited in one window (Batch Mode, later), reusing the
+        # cached prefix across them. Security is on Pro (tier="powerful"), so it CANNOT share the Flash
+        # diff-handle anyway - a CachedContent is model-bound. NOTE: today the prefix is usually under
+        # Gemini's ~2048-token cache floor, so this falls back to plain Flash (below) until the
+        # rules/compliance corpus grows past it; it's a deliberate forward-looking path, not dead code.
+        try:
+            stable = messages[0]["content"]
+            diff_msg = messages[1]["content"]
+            res = await llm.acall(tier="powerful", cache=True,
+                                   response_model=SecurityAuditOutput,
+                                   messages=[cached_system(stable),
+                                             {"role": "user", "content": diff_msg}],
+                                    max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+            response = SecurityAuditOutput.model_validate_json(res.output)
+            # Cache observability: cache_read_tokens>0 on a repeat run is the proof the stable
+            # prefix was served from the CachedContent (claim). Surface it on the message.
+            cache_note = (f"Cache: read={res.cache_read_tokens} input={res.input_tokens} "
+                          f"output={res.output_tokens} cost=${res.cost_usd:.6f}\n")
+        except QuotaExhaustedError:
+            raise
+        except Exception:
+            response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,messages=messages,
+                                    response_model=SecurityAuditOutput,
+                                    max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+    else:
+        try:
+            response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,messages=messages,
                                response_model=SecurityAuditOutput,
                                max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
-    except QuotaExhaustedError:
-        raise
-    except Exception as e:
-        return {"audit": {
-            "messages": [f"System: security_audit failed after retries ({type(e).__name__}); no findings recorded."],
-            "security_findings": [],
-            "node_errors": [f"security_audit: {type(e).__name__} - {str(e)}"]
-        }}
+        except QuotaExhaustedError:
+            raise
+        except Exception as e:
+            return {"audit": {
+                "messages": [f"System: security_audit failed after retries ({type(e).__name__}); no findings recorded."],
+                "security_findings": [],
+                "node_errors": [f"security_audit: {type(e).__name__} - {str(e)}"]
+            }}
 
     #Format a system message summary
     new_message = (
         "System: Security checks complete. \n"
+        f"{cache_note}"
         f"Reasoning: {response.reasoning}\n"
         f"Found {len(response.findings)} issues\n"
     )

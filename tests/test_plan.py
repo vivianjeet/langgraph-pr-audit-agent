@@ -60,9 +60,12 @@ def test_plan_skips_when_no_diff(patched_create, empty):
 
 
 def test_plan_falls_back_on_nonretryable_error(patched_create):
-    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
+    # A hard error on EVERY tier -> the router walks its fallback chain (balanced->fast), and when all
+    # tiers fail the node degrades to the default plan. (Routing through acall added tier fallback, so
+    # _raw_chat is hit once per tier, not once total - the degrade-to-default behaviour is unchanged.)
+    patched_create.side_effect = RuntimeError("boom")
     out = plan_mod.plan_audit_node({"audit": {"parsed_diff": "x", "messages": []}})
-    patched_create.assert_called_once()
+    assert patched_create.call_count >= 1                         # tried at least the primary tier
     assert out["audit"]["audit_plan"]["audit_depth"] == "shallow"
 
 def test_plan_degrades_on_transient_error(patched_create):
