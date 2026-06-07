@@ -1,10 +1,19 @@
 # Finalize: assemble the structured report (JSON + Markdown) and persist for future precendent.
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.text_utils import clip
+import src.config as cfg
 
 # `report` findings are dicts, so `severity` is a plain string ("critical"); rank
-# explicitly so `[:3]` is the 3 WORST findings, not just the first 3 the LLM emitted.
+# explicitly so `[:cfg.TOP_FINDINGS_PER_DIM]` is the N WORST findings, not just the first N
+# the LLM emitted.
 _SEV_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4, "none": 5}
+# Map the human verdict -> report status. Keyed by human_decision; the default ("passed")
+# covers "n/a"/never-escalated (a clean PR that needed no human is NOT a block).
+_STATUS = {
+        "approve": "passed",
+        "needs-changes": "changes-required",
+        "reject": "rejected",
+    }
 
 def _findings_to_dicts(findings):
     return [f.model_dump(mode="json") for f in findings]
@@ -15,11 +24,14 @@ def finalize_report_node(state: AMSState):
     store it in pgvector for future retrieval.
     """
     ams = AMS(state)
+    
+    human_decision = ams.read("human_decision", "n/a")
     report = {
         "security_score": ams.read("security_score",1.0),
         "quality_score": ams.read("quality_score",1.0),
         "test_score": ams.read("test_score", 1.0),
-        "human_decision": ams.read("human_decision", "n/a"),
+        "human_decision": human_decision,
+        "status": _STATUS.get(human_decision,"passed"), 
         "iterations" : ams.read("iteration_count", 0),
         "security_findings": _findings_to_dicts(ams.read("security_findings",[])),
         "quality_findings": _findings_to_dicts(ams.read("quality_findings",[])),
@@ -33,6 +45,7 @@ def finalize_report_node(state: AMSState):
         f"**Quality score:** {report['quality_score']}  |  "
         f"**Test score:** {report['test_score']}  |  "
         f"**Human decision:** {report['human_decision']}  |  "
+        f"**Status:** {report['status']}  |  "
         f"**Reflexion iterations:** {report['iterations']}",
         f"**Files changed:** {', '.join(report['files_changed']) or 'n/a'}",
         "",
@@ -65,7 +78,8 @@ def finalize_report_node(state: AMSState):
         f"security_score {report['security_score']}; test_score {report['test_score']}; "
         f"{len(report['security_findings'])} security findings, "
         f"{len(report['quality_findings'])} quality findings, "
-        f"{len(report['test_findings'])} test findings"
+        f"{len(report['test_findings'])} test findings; "
+        f"verdict: {report['human_decision']} (status: {report['status']})"
     )
 
     parsed_diff = ams.read("parsed_diff","")
@@ -77,7 +91,7 @@ def finalize_report_node(state: AMSState):
     # Episodic: a human-readable recap of THIS session,
     # for future "have we seen this before? recall." Covers ALL THREE finding types
     # (not security-only) so cross-session recall reflects the whole audit.
-    def _top(findings, n=3):
+    def _top(findings, n=cfg.TOP_FINDINGS_PER_DIM):
         return sorted(findings, key=lambda f: _SEV_RANK.get(str(f["severity"]).lower(), 99))[:n]
 
     def _fmt(findings):

@@ -4,11 +4,17 @@
 import asyncio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-
-SERVER = StdioServerParameters(command="python", args=["-m", "src.mcp.compliance_rag_server"])
-
+import sys
+import os
 
 async def main():
+    verbose = "--v" in sys.argv or "--verbose" in sys.argv
+    print(f"[client] verbose={verbose}  (sys.argv={sys.argv})", file=sys.stderr)
+    SERVER = StdioServerParameters(
+        command="python", 
+        args=["-m", "src.mcp.compliance_rag_server"],
+        env={**os.environ, **({"MCP_DEBUG": "1"} if verbose else {})}
+    )
     async with stdio_client(SERVER) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()                       # MCP handshake

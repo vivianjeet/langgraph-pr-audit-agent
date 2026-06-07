@@ -9,19 +9,18 @@ from src.llm_retry import call_gemini, QuotaExhaustedError
 # critique set; superset = reflexion's prefixes + post-synthesis decisions.
 from src.state import COMPRESSION_SIGNAL_PREFIXES as COMPRESSION_SIGNAL_PREFIXES
 from src.token_budget import estimate_tokens   # shared counter: trigger + budget agree
+import src.config as cfg
 
-FAST_MODEL = "gemini-2.5-flash"
-SUMMARY_TOKENS = 1024
-DEMO_BUDGET = 10000
-
-def should_compress(messages: list, count_fn, budget: int, threshold: float = 0.8) -> bool:
+def should_compress(messages: list, count_fn, budget: int,
+                    threshold: float = cfg.COMPRESSION_TRIGGER_RATIO) -> bool:
     """True when current message tokens reach `threshold` (default 80%) of `budget`.
     This is the TRIGGER - the 80% context threshold."""
     used = sum(count_fn(str(m)) for m in messages)
     return used >= threshold * budget
 
 
-def compress_history(messages: list, compress_ratio: float = 0.5, min_keep: int = 2) -> list:
+def compress_history(messages: list, compress_ratio: float = cfg.COMPRESSION_FOLD_RATIO,
+                     min_keep: int = cfg.COMPRESSION_MIN_RECENT_KEEP) -> list:
     """
     Compress the OLDEST `compress_ratio` of the message list (default: oldest 50%) into
     ONE summary message, keeping the newest portion verbatim. Returns [summary, *recent].
@@ -54,8 +53,8 @@ def compress_history(messages: list, compress_ratio: float = 0.5, min_keep: int 
         class _Summary(BaseModel):
             summary: str = Field(description="One-paragraph compressed recap, signal preserved")
 
-        out = call_gemini(model=FAST_MODEL, messages=messages_payload,
-                          response_model=_Summary, max_output_tokens=SUMMARY_TOKENS)
+        out = call_gemini(model=cfg.GEMINI_FLASH_MODEL, messages=messages_payload,
+                          response_model=_Summary, max_output_tokens=cfg.SUMMARY_MAX_OUTPUT_TOKENS)
         summary_text = out.summary
     except QuotaExhaustedError:
         raise
@@ -67,7 +66,7 @@ def compress_history(messages: list, compress_ratio: float = 0.5, min_keep: int 
     return [f"System: [compressed {len(old)} earlier messages] {summary_text}", *recent]
 
 def run_compression_pass(messages: list, force: bool = False,
-                         budget: int = DEMO_BUDGET) -> tuple[dict, str]:
+                         budget: int = cfg.COMPRESSION_DEMO_BUDGET_TOKENS) -> tuple[dict, str]:
     """Live compression pass over a finished session's messages.
 
     Fires when EITHER `force` is set (the --large flag) OR should_compress says we've
@@ -78,14 +77,14 @@ def run_compression_pass(messages: list, force: bool = False,
     Read-only w.r.t. the audit transcript; only ever writes the `compressed` channel.
     """
     used = sum(estimate_tokens(str(m)) for m in messages)
-    auto = should_compress(messages, estimate_tokens, budget, threshold=0.8)
+    auto = should_compress(messages, estimate_tokens, budget, threshold=cfg.COMPRESSION_TRIGGER_RATIO)
     if not (force or auto):
         pct = (used / budget * 100) if budget else 0
         return {}, (f"[compression] not triggered - {used} tok = {pct:.0f}% of {budget} "
                     f"(< 80% threshold, and --large not set). History left intact.")
 
     path = "AUTO (>=80% of budget)" if auto else "--large (forced below threshold)"
-    compacted = compress_history(messages, compress_ratio=0.5)
+    compacted = compress_history(messages, compress_ratio=cfg.COMPRESSION_FOLD_RATIO)
     after = sum(estimate_tokens(str(m)) for m in compacted)
     report = (
         f"[compression] FIRED via {path}.\n"

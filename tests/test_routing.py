@@ -28,7 +28,8 @@ def _sec(sev: Severity) -> SecurityFinding:
                            line_number=1,
                            description="x",
                            cwe_id="CWE-89",
-                           severity=sev)
+                           severity=sev, 
+                           title="SQL Injection")
 
 def _make_state(**overrides) -> dict:
     """

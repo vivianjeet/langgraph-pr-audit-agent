@@ -2,6 +2,7 @@
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.text_utils import clip
 from src.state import RuleCategory
+import src.config as cfg
 
 # All procedural-rule categories, recalled ONCE here and written to the `procedural`
 # channel; plan + each audit node read their own subset from the channel (no re-query).
@@ -20,7 +21,7 @@ def retrieve_context_node(state: AMSState):
     parsed_diff = ams.read("parsed_diff","")
 
     try:
-        similar = ams.recall_similar_prs(parsed_diff, k = 3)
+        similar = ams.recall_similar_prs(parsed_diff, k=cfg.RECALL_SIMILAR_PRS_K)
     except Exception as e:
         # The DB down should never crash the audit - degrade gracefully.
         # don't return early - we still want to try episodic recall below.
@@ -30,7 +31,7 @@ def retrieve_context_node(state: AMSState):
         sem_err = None
 
     try:
-        episodes = AMS.recall_episodes(parsed_diff, k=2)
+        episodes = AMS.recall_episodes(parsed_diff, k=cfg.RECALL_EPISODES_K)
     except Exception:
         episodes = []
 
@@ -42,10 +43,10 @@ def retrieve_context_node(state: AMSState):
     if sem_err:
         msgs.append(sem_err)
     if similar:
-        lines = [f"- {clip(s['pr_summary'], 120)} (sim={s['similarity']:.2f})" for s in similar]
+        lines = [f"- {clip(s['pr_summary'], cfg.CLIP_WIDTH_SHORT)} (sim={s['similarity']:.2f})" for s in similar]
         msgs.append("System: Retrieved similar PR history:\n" + "\n".join(lines))
     if episodes:
-        elines = [f"- {clip(e['summary'], 140)} (sim={e['similarity']:.2f})" for e in episodes]
+        elines = [f"- {clip(e['summary'], cfg.CLIP_WIDTH_DEFAULT)} (sim={e['similarity']:.2f})" for e in episodes]
         msgs.append("System: Recalled past sessions:\n" + "\n".join(elines))
     if not msgs:
         msgs = ["System: No similar past PRs or sessions found above threshold."]

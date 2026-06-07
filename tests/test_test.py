@@ -25,7 +25,8 @@ def _finding(severity):
         file_path="src/service.py",
         line_number=10,
         description= "Magic number must be a named constant.",
-        severity = severity
+        severity = severity,
+        title = "Missing Test"
     )
 
 @pytest.mark.parametrize("severity", [Severity.HIGH, Severity.MEDIUM, Severity.LOW])

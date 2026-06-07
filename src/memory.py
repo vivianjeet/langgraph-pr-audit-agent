@@ -17,7 +17,9 @@
 from typing import Annotated, TypedDict
 from src.state import AuditState, RuleCategory, RuleStatus
 from src.db import vectorstore as vs
+import src.config as cfg
 
+_NO_LEARN = {"needs-changes", "reject"}
 
 def merge_audit(old: dict | None, new: dict | None) -> dict:
     """Reducer for the nested `audit` channel of AMSState.
@@ -85,7 +87,7 @@ class AgentMemorySystem:
 
     # ---- 2. Semantic memory ( similar past PR audits ) ----
     @staticmethod
-    def recall_similar_prs(diff_text: str, k: int = 3) -> list[dict]:
+    def recall_similar_prs(diff_text: str, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
         return vs.retrieve_similar_prs(diff_text, k=k)
 
     @staticmethod
@@ -94,7 +96,7 @@ class AgentMemorySystem:
 
     # ---- 3. Episodic memory ( compressed session summaries ) ----
     @staticmethod
-    def recall_episodes(query_text: str, k: int = 3) -> list[dict]:
+    def recall_episodes(query_text: str, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
         return vs.retrieve_episodes(query_text, k=k)
 
     @staticmethod
@@ -120,7 +122,7 @@ class AgentMemorySystem:
         return vs.list_active_rules()
 
     @staticmethod
-    def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
+    def similar_rules(rule_id: int, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
         return vs.similar_rules(rule_id, k=k)
 
     @staticmethod
@@ -152,11 +154,17 @@ class AgentMemorySystem:
             test->coverage),
           - deduped against rules ALREADY stored for that category (case-insensitive), so
             re-auditing the same PR does not keep re-inserting the same rule.
-        `human_decision` (this PR's verdict) is stored on each learned rule as provenance so a
-        reviewer sees whether a pending rule came from an approved or rejected audit. It does
-        NOT gate learning - the human decides at review time, informed by this context.
+        `human_decision` (this PR's verdict) is stored on each learned rule as provenance AND
+        gates learning: a "needs-changes"/"reject" verdict suppresses it entirely (returns 0),
+        since rules learned from soon-to-change or abandoned code would pollute future audits.
+        "approve" (or a never-escalated run, where human_decision is "n/a"/None) learns as normal.
         Best-effort: any per-rule DB error is swallowed. Returns the count actually added.
         """
+        # A "needs-changes"/"reject" verdict means this code is being revised or abandoned -
+        # do NOT promote its findings into standing rules. (Precedent + episode are still
+        # stored: the deferral is honest history; only LEARNING is suppressed.)
+        if str(human_decision or "").strip().lower() in _NO_LEARN:
+            return 0
         buckets = ((RuleCategory.SECURITY, security), 
                    (RuleCategory.QUALITY, quality), (RuleCategory.COVERAGE, coverage))
         added = 0

@@ -1,25 +1,21 @@
-from src.state import Severity
 from src.memory import AgentMemorySystem as AMS, AMSState
+import src.config as cfg
 
-
-_SEVERITY_PENALTY = {
-    Severity.CRITICAL: 0.6,
-    Severity.HIGH: 0.3,
-    Severity.MEDIUM: 0.15,
-    Severity.LOW: 0.07,
-    Severity.INFO: 0.02,
-    Severity.NONE: 0.0
-}
 
 def _weighted_score(findings) -> float:
-    """1.0 = clean. Subtract severity-weighed penalties, clamp to [0, 1].
-    Deterministic = testable, $0 (no LLM). One function for all 3 dimensions (DRY:
-    collapses the three identical _compute_*_score helpers into one).
+    """1.0 = clean. Each finding MULTIPLICATIVELY erodes the remaining score, so several moderate
+    findings approach 0 with diminishing returns instead of summing past it - SEVERITY, not raw
+    COUNT, drives the risk. (A linear sum let 4 HIGH findings hit exactly 0.0, scoring a messy
+    class the same as a catastrophe; multiplicative gives 4 HIGH -> 0.24 - low, still escalates,
+    but distinguishable.) A single CRITICAL still bites hard (0.4). Deterministic, no LLM, one
+    function for all 3 dimensions.
     """
     if not findings:
         return 1.0
-    penalty = sum(_SEVERITY_PENALTY.get(f.severity,0.0) for f in findings)
-    return max(0.0, round(1.0 - penalty, 2))
+    score = 1.0
+    for f in findings:
+        score *= (1.0 - cfg.SEVERITY_PENALTY.get(f.severity, 0.0))
+    return round(score, 2)
 
 def synthesize_report_node(state: AMSState):
     """ Aggregate the three audits into a single risk score the router can act on"""

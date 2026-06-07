@@ -4,9 +4,7 @@ from pydantic import BaseModel, Field
 from src.state import QualityFinding, RuleCategory
 from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
-
-FAST_MODEL = "gemini-2.5-flash"
-SMALL_TOKEN_COUNT = 4000
+import src.config as cfg
 
 class QualityAuditOutput(BaseModel):
     reasoning: str = Field(
@@ -57,6 +55,14 @@ async def quality_audit_node(state: AMSState):
         "- Hardcoded values and magic numbers\n"
         "- High cyclomatic complexity\n"
         "- DRY/SOLID principle violations\n\n"
+        "Assign each finding a severity using THIS scale, and do not inflate it:\n"
+        "- CRITICAL: reserved for issues that break the build or cause data loss. "
+        "Code-quality smells are almost NEVER critical.\n"
+        "- HIGH: a real maintainability risk a reviewer must address before merge.\n"
+        "- MEDIUM: worth fixing but not blocking.\n"
+        "- LOW: minor / stylistic.\n"
+        "A rename, a small refactor, or a stylistic nit is LOW - never HIGH or CRITICAL.\n"
+        "If the diff has no quality issues, return an EMPTY findings list. Do not invent findings.\n\n"
     )
     user_prompt = (
         "Code diff to analyze:\n"
@@ -69,9 +75,9 @@ async def quality_audit_node(state: AMSState):
             {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
         ]
     try:
-        response = await call_gemini_async(model=FAST_MODEL, messages=messages,
+        response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL, messages=messages,
                                response_model=QualityAuditOutput,
-                               max_output_tokens=SMALL_TOKEN_COUNT)
+                               max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:

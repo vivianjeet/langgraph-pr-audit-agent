@@ -82,22 +82,21 @@ def test_learning_stores_human_decision():
         vs.get_all_rule_contents.return_value = []          # nothing stored -> no dedup skip
         added = AMS.learn_rules_from_findings(
             security=[_crit("SQL injection via f-string in login")],
-            human_decision="needs-changes",
+            human_decision="approve",
         )
     assert added == 1
     _, kwargs = vs.add_rule.call_args
     assert kwargs["status"] == RuleStatus.LEARNED_PENDING
-    assert kwargs["source_decision"] == "needs-changes"
+    assert kwargs["source_decision"] == "approve"
 
+def test_learning_gated_on_reject_and_needs_changes():
+    for verdict in ("reject", "needs-changes"):
+        with patch("src.memory.vs") as vs:
+            vs.get_all_rule_contents.return_value = []
+            added = AMS.learn_rules_from_findings(
+                security=[_crit("SQL injection via f-string in login")],
+                human_decision=verdict,
+            )
+        assert added == 0
+        vs.add_rule.assert_not_called()
 
-def test_learning_not_gated_by_decision():
-    # A 'reject' verdict does NOT stop learning - the rule is still captured (just tagged),
-    # because the human approval gate (review_rules.py), not the PR verdict, is the real filter.
-    with patch("src.memory.vs") as vs:
-        vs.get_all_rule_contents.return_value = []
-        added = AMS.learn_rules_from_findings(
-            security=[_crit("SQL injection via f-string in login")],
-            human_decision="reject",
-        )
-    assert added == 1
-    assert vs.add_rule.call_args.kwargs["source_decision"] == "reject"

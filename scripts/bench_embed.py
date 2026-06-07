@@ -5,7 +5,8 @@ Makes real API calls - uses the free tier, keep N modest
 """
 
 import time
-from src.db.vectorstore import embed, embed_batch, EMBED_DIM
+from src.db.vectorstore import embed, embed_batch
+from src.config import EMBED_OUTPUT_DIM as EMBED_DIM
 
 N = 30
 texts = [f"def handler_{i}(requests): return authorize(requests.user)" for i in range(N)]

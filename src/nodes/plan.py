@@ -3,9 +3,7 @@ from pydantic import BaseModel, Field
 from src.llm_retry import call_gemini, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.text_utils import clip as _clip
-
-FAST_MODEL = "gemini-2.5-flash"
-SMALL_TOKEN_COUNT = 4000
+import src.config as cfg
 
 class PlanAuditOutput(BaseModel):
     reasoning: str = Field(
@@ -51,10 +49,10 @@ def plan_audit_node(state: AMSState):
     precedent_block = ""
     if similar:
         precedent_block += "Similar past audits:\n" + "\n".join(
-            f"- {_clip(s['pr_summary'], 160)}" for s in similar) + "\n"
+            f"- {_clip(s['pr_summary'], cfg.CLIP_WIDTH_LONG)}" for s in similar) + "\n"
     if episodes:
         precedent_block += "Relevant past sessions:\n" + "\n".join(
-            f"- {_clip(e['summary'], 160)}" for e in episodes) + "\n"
+            f"- {_clip(e['summary'], cfg.CLIP_WIDTH_LONG)}" for e in episodes) + "\n"
     if rules:
         precedent_block += "Standing org rules to apply:\n" + "\n".join(
             f"- {r}" for r in rules) + "\n"
@@ -82,9 +80,9 @@ def plan_audit_node(state: AMSState):
                 .replace("{{precedent}}", precedent_block)}
         ]
     try:
-        response: PlanAuditOutput = call_gemini(model=FAST_MODEL,messages = messages,
+        response: PlanAuditOutput = call_gemini(model=cfg.GEMINI_FLASH_MODEL,messages = messages,
                                                 response_model=PlanAuditOutput,
-                                                max_output_tokens=SMALL_TOKEN_COUNT)
+                                                max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:

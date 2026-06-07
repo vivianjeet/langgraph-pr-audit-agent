@@ -4,9 +4,7 @@ from pydantic import BaseModel, Field
 from src.state import SecurityFinding, RuleCategory
 from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
-
-FAST_MODEL = "gemini-2.5-flash"
-SMALL_TOKEN_COUNT = 4000
+import src.config as cfg
 
 class SecurityAuditOutput(BaseModel):
     reasoning: str = Field(
@@ -71,6 +69,16 @@ async def security_audit_node(state: AMSState):
         "or exposing personal data like Customer Records, PAN, Aadhaar etc) \n"
         "- Authentication bypass \n"
         "- Insecure dependencies \n\n"
+        "Assign each finding a severity using THIS scale for SECURITY, and do not inflate it:\n"
+        "- CRITICAL: a directly exploitable vulnerability - SQL/command injection, auth bypass, "
+        "RCE, or a committed secret/credential.\n"
+        "- HIGH: a serious weakness that needs a specific precondition to exploit "
+        "(e.g. missing authz check, sensitive data exposure).\n"
+        "- MEDIUM: a hardening gap or defence-in-depth issue, not directly exploitable.\n"
+        "- LOW: minor / informational.\n"
+        "Only report ACTUAL security issues. A rename, refactor, or non-security change has NO "
+        "security findings - return an EMPTY list. Do not invent vulnerabilities.\n\n"
+
     )
     user_prompt = (
         "Code diff to analyze:\n"
@@ -84,9 +92,9 @@ async def security_audit_node(state: AMSState):
         {"role": "user", "content": user_prompt.replace("{{diff}}",parsed_diff)},
     ]
     try:
-        response = await call_gemini_async(model=FAST_MODEL,messages=messages,
+        response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,messages=messages,
                                response_model=SecurityAuditOutput,
-                               max_output_tokens=SMALL_TOKEN_COUNT)
+                               max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:

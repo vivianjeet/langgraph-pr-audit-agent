@@ -4,7 +4,8 @@ Scoring helper:
 - test_clean_is_one                     : no findings -> score 1.0.
 - test_single_finding_penalty           : one finding deducts by severity (parametrised).
 - test_two_mediums_land_borderline      : two mediums land in the borderline band.
-- test_score_clamped_at_zero            : enough findings can't push score below 0.
+- test_many_findings_approach_but_never_cross_zero : multiplicative scoring trends to ~0 but never
+                                          hits exactly 0 / goes negative.
 
 Synthesize node:
 - test_synthesize_writes_all_three_scores       : security/quality/test scores all written.
@@ -19,7 +20,7 @@ from src.state import SecurityFinding, Severity
 
 def _f(sev) -> SecurityFinding:
     return SecurityFinding(file_path="a.py", line_number=1, description="x",
-                           cwe_id="CWE-1", severity=sev)
+                           cwe_id="CWE-1", severity=sev, title="example")
 
 def test_clean_is_one():
     assert _weighted_score([]) == 1.0
@@ -37,12 +38,15 @@ def test_single_finding_penalty(sev, expected):
     assert _weighted_score([_f(sev)]) == pytest.approx(expected)
 
 def test_two_mediums_land_borderline():
-    # 1 - (0.15 + 0.15) = 0.7 -> top of the re3flect band
-    assert _weighted_score([_f(Severity.MEDIUM), _f(Severity.MEDIUM)]) == pytest.approx(0.7)
+    # Multiplicative: 0.85 * 0.85 = 0.7225 -> 0.72, still in the borderline/reflect band.
+    assert _weighted_score([_f(Severity.MEDIUM), _f(Severity.MEDIUM)]) == pytest.approx(0.72)
 
-def test_score_clamped_at_zero():
-    # penalty far exceeds 1.0 -> clamp to 0.0, never negative
-    assert _weighted_score([_f(Severity.CRITICAL)]*5) == 0.0
+def test_many_findings_approach_but_never_cross_zero():
+    # Multiplicative scoring NEVER hits exactly 0 (each finding erodes a fraction of what's left),
+    # but a pile of CRITICALs drives it very low. 0.4**5 = 0.01024 -> 0.01. Always >= 0, never
+    # negative. (Was test_score_clamped_at_zero under the old linear-sum clamp.)
+    assert _weighted_score([_f(Severity.CRITICAL)] * 5) == pytest.approx(0.01)
+    assert _weighted_score([_f(Severity.CRITICAL)] * 5) > 0.0
 
 def test_synthesize_writes_all_three_scores():
     out = synthesize_report_node({"audit": {

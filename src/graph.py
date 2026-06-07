@@ -15,6 +15,7 @@ from src.nodes.finalize import finalize_report_node
 from src.nodes.compress import compress_node
 from src.nodes.compliance import compliance_node
 from src.state import Severity
+import src.config as cfg
 
 #=================================================================
 # Node Stubs
@@ -28,11 +29,6 @@ def human_review_node(state: AMSState):
 # Routing Logic
 #=================================================================
 
-AUTH_HINTS = ("auth", "login", "session", "credential", "token", "password", "permission")
-REFLECT_LO, REFLECT_HI = 0.5, 0.7
-MAX_REFLECTIONS = 2
-SCORE_KEYS = ("security_score", "quality_score", "test_score")
-
 def should_reflect(state: AMSState) -> bool:
     """
     Decides if the AI needs to critique its own work or move forward
@@ -43,18 +39,18 @@ def should_reflect(state: AMSState) -> bool:
     """
 
     ams = AMS(state)
-    if ams.read("iteration_count",0) >= MAX_REFLECTIONS:
+    if ams.read("iteration_count",0) >= cfg.MAX_REFLECTION_PASSES:
         return False
 
     # Borderline on any dimension -> worth a sharper second pass
-    for key in SCORE_KEYS:
-        if REFLECT_LO <= ams.read(key,1.0) <= REFLECT_HI:
+    for key in cfg.SCORE_KEYS:
+        if cfg.REFLECT_SCORE_LOW <= ams.read(key,1.0) <= cfg.REFLECT_SCORE_HIGH:
             return True
 
     # Suspicious silence: auth-related change but no security findings -> reflect to see
     # if we missed something
     files = ams.read("files_changed",[])
-    touched_auth = any(any(h in f.lower() for h in AUTH_HINTS) for f in files)
+    touched_auth = any(any(h in f.lower() for h in cfg.AUTH_FILE_HINTS) for f in files)
     if touched_auth and len(ams.read("security_findings",[])) == 0:
         return True
     return False
@@ -64,7 +60,7 @@ def needs_human_review(state: AMSState) -> bool:
     Escalate to a human on any CRITICAL finding or a low score (<0.5).
     """
     ams = AMS(state)
-    if any(ams.read(key,1.0) < 0.5 for key in SCORE_KEYS):
+    if any(ams.read(key,1.0) < cfg.LOW_SCORE_THRESHOLD for key in cfg.SCORE_KEYS):
         return True
     all_findings = (
         ams.read("security_findings",[])
