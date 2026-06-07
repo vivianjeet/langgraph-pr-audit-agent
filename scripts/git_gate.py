@@ -36,28 +36,32 @@ def merge_is_clean(base: str, in_ci_: bool | None = None) -> tuple[bool, str]:
     return True, "merges cleanly"
 
 
-def pr_is_human_approved() -> bool:
-    """True if any reviewer has submitted an APPROVED review on THIS PR. Read via gh (carries
-    auth). This is how the asynchronous human gate 'resumes' the pipeline: run 1 exits 1 (merge
-    blocked); a human clicks Approve in GitHub; the re-triggered run sees APPROVED here and exits
-    0. No stdin, no paused process - GitHub holds the state. Best-effort: any failure -> False.
-
-    In CI the checkout is a detached merge ref, so `gh pr view` can't infer the PR from the
-    branch - pass the number explicitly via PR_NUMBER (set in the workflow from the event
-    context). Locally (on the PR branch) gh infers it, so PR_NUMBER is optional."""
+def pr_human_decision() -> str | None:
+    """The latest human review verdict on THIS PR, mapped to our decision vocabulary:
+      APPROVED          -> "approve"
+      CHANGES_REQUESTED -> "needs-changes"
+      anything else / no review / error -> None  (= no verdict yet; caller keeps the build blocked)
+    Read via `gh` (carries auth). Mirrors pr_is_human_approved's PR_NUMBER handling: in CI the
+    checkout is a detached merge ref so the PR can't be branch-inferred - PR_NUMBER supplies it;
+    locally gh infers it. Best-effort: any failure -> None (fail-closed: no verdict = blocked)."""
     pr = os.environ.get("PR_NUMBER")
     cmd = ["gh", "pr", "view"]
     if pr:
         cmd.append(pr)
     cmd += ["--json", "reviews",
-            "--jq", '[.reviews[] | select(.state=="APPROVED")] | length']
+            "--jq", "(.reviews | last | .state) // \"\""]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        return False
-    try:
-        return int(r.stdout.strip()) > 0
-    except ValueError:
-        return False
+        return None
+    state = r.stdout.strip().strip('"')
+    return {"APPROVED": "approve", "CHANGES_REQUESTED": "needs-changes"}.get(state)
+
+
+def pr_is_human_approved() -> bool:
+    """True iff the latest human review verdict is APPROVED. Thin wrapper over pr_human_decision
+    so there's ONE source of truth for the PR's verdict; kept because run_gate + older callers
+    use the boolean. Any failure -> False (fail-closed)."""
+    return pr_human_decision() == "approve"
 
 
 def _git_diff(base: str, in_ci: bool) -> str:

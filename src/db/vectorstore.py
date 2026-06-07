@@ -240,29 +240,57 @@ def store_pr_audit(pr_summary: str, report: dict, embed_text: str | None = None)
         )
         conn.commit()
 
+# Two precedent rows closer than this in cosine sim are near-duplicates (e.g. the same PR's
+# needs-changes run and its later approve run). Provisional - eyeball on real data before
+# trusting it. Embeddings dedup; the LLM is never involved.
+_PRECEDENT_DEDUP_SIM = 0.95
+
+def _cosine(a, b) -> float:
+    """Cosine similarity between two pgvector embeddings (sequences of floats). No numpy so the
+    dep stays light; vectors are 768-dim so this is cheap. Returns 0.0 on a zero vector."""
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
 def retrieve_similar_prs(query_text: str, k: int = 3) -> list[dict]:
     """
-    Return upto `k` past audits with cosine similarity > SIM_THRESHOLD.
+    Return up to `k` past audits with cosine similarity > SIM_THRESHOLD, DE-DUPLICATED.
+    A PR that evolved (needs-changes -> fix -> approve) leaves several near-identical rows;
+    returning 3 copies of one PR's history is noise. So we over-fetch, then greedily keep rows
+    that are NOT near-duplicates of one already kept (cosine sim > _PRECEDENT_DEDUP_SIM), and
+    return the top `k` DISTINCT ones. Pure vector math - no LLM. Full history stays in the table;
+    only the returned VIEW is de-duped.
     """
     vec = embed(query_text)
+    over_fetch = max(k * 4, 10)          # wider net so we can drop dupes and still fill k
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH};")
         cur.execute(
             """
-            SELECT pr_summary, report, 1 - (embedding <=> %s::vector) AS similarity
+            SELECT pr_summary, report, embedding, 1 - (embedding <=> %s::vector) AS similarity
             FROM pr_audits
             ORDER BY embedding <=> %s::vector
             LIMIT %s;
             """,
-            (vec, vec, k),
+            (vec, vec, over_fetch),
         )
         rows = cur.fetchall()
-    
-    return [
-        {"pr_summary": r[0], "report": r[1], "similarity": float(r[2])}
-        for r in rows
-        if float(r[2]) > SIM_THRESHOLD
-    ]
+
+    # rows are best-first; keep a row unless it's a near-dup (by embedding) of one already kept.
+    kept: list[dict] = []
+    kept_vecs: list = []
+    for pr_summary, report, emb, sim in rows:
+        sim = float(sim)
+        if sim <= SIM_THRESHOLD:
+            continue
+        if any(_cosine(emb, kv) > _PRECEDENT_DEDUP_SIM for kv in kept_vecs):
+            continue                     # near-dup of an already-kept precedent -> skip
+        kept.append({"pr_summary": pr_summary, "report": report, "similarity": sim})
+        kept_vecs.append(emb)
+        if len(kept) >= k:
+            break
+    return kept
 
 def search_compliance(query_text: str, k: int = 3, framework: str | None = None) -> list[dict]:
     """Return up to `k` compliance passages with cosine similarity > SIM_THRESHOLD.

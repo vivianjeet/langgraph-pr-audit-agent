@@ -30,7 +30,8 @@ class RuleCategory(str, Enum):
 
 class _FindingBase(BaseModel):
     severity: Severity
-
+    title: str = Field(description="A short one-line summary of the issue (max ~8 words)")
+    
     @field_validator("severity", mode="before")
     @classmethod
     def _coerce_severity(cls, v):

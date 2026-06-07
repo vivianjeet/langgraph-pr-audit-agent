@@ -18,6 +18,7 @@ from typing import Annotated, TypedDict
 from src.state import AuditState, RuleCategory, RuleStatus
 from src.db import vectorstore as vs
 
+_NO_LEARN = {"needs-changes", "reject"}
 
 def merge_audit(old: dict | None, new: dict | None) -> dict:
     """Reducer for the nested `audit` channel of AMSState.
@@ -152,11 +153,17 @@ class AgentMemorySystem:
             test->coverage),
           - deduped against rules ALREADY stored for that category (case-insensitive), so
             re-auditing the same PR does not keep re-inserting the same rule.
-        `human_decision` (this PR's verdict) is stored on each learned rule as provenance so a
-        reviewer sees whether a pending rule came from an approved or rejected audit. It does
-        NOT gate learning - the human decides at review time, informed by this context.
+        `human_decision` (this PR's verdict) is stored on each learned rule as provenance AND
+        gates learning: a "needs-changes"/"reject" verdict suppresses it entirely (returns 0),
+        since rules learned from soon-to-change or abandoned code would pollute future audits.
+        "approve" (or a never-escalated run, where human_decision is "n/a"/None) learns as normal.
         Best-effort: any per-rule DB error is swallowed. Returns the count actually added.
         """
+        # A "needs-changes"/"reject" verdict means this code is being revised or abandoned -
+        # do NOT promote its findings into standing rules. (Precedent + episode are still
+        # stored: the deferral is honest history; only LEARNING is suppressed.)
+        if str(human_decision or "").strip().lower() in _NO_LEARN:
+            return 0
         buckets = ((RuleCategory.SECURITY, security), 
                    (RuleCategory.QUALITY, quality), (RuleCategory.COVERAGE, coverage))
         added = 0

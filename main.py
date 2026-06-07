@@ -6,6 +6,8 @@ from src.llm_retry import QuotaExhaustedError
 from src.state import Severity
 import asyncio
 
+VALID_DECISIONS = ("approve", "reject", "needs-changes")
+
 async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=None) -> bool:
     """Runs the end to end graph execution on the provided diff.
 
@@ -68,14 +70,33 @@ async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=N
                          if str(_fld(f, "severity")) in (Severity.CRITICAL, Severity.CRITICAL.value)]
             for f in criticals:
                 print(f">>>    CRITICAL {_fld(f,'file_path')}:{_fld(f,'line_number','?')} - {_fld(f,'description')}")
-
+            
             if ci:
-                # No stdin in CI - don't prompt, don't resume. Report and hand the gate decision
-                # back to the caller (it checks the PR's approval state and sets the exit code).
-                print(">>> CI: escalated to human review. Caller will gate the build.")
-                return True
+                # No stdin in CI - the human's verdict lives on the GitHub PR (review state).
+                # Map it to our vocabulary; if there's no verdict yet, stay BLOCKED (return True
+                # without resuming - the gate will exit 1). If there IS a verdict, inject it and
+                # resume so the SAME finalize branch the CLI prompt drives runs here too (parity).
+                from scripts.git_gate import pr_human_decision
+                decision = pr_human_decision()
+                if decision is None:
+                    print(">>> CI: escalated, no human verdict on the PR yet. Build blocked.")
+                    return True
+                print(f">>> CI: GitHub verdict = {decision}. Resuming with it.")
+                await app.aupdate_state(config, {"audit": {"human_decision": decision}})
+                await _drain(app.astream(None, config=config))
+                final_audit = (await app.aget_state(config)).values.get("audit", {})
+                print(final_audit.get("final_report", "(no report)"))
+                # approve -> not blocked (False); needs-changes/reject -> blocked (True).
+                return decision != "approve"
 
-            decision = input(">>> Enter decision [approve/reject/needs-changes]: ").strip() or "approve"
+            while True:
+                decision = input(">>> Enter decision [approve/reject/needs-changes]: ").strip().lower()
+                if not decision:
+                    decision = "approve"
+                    break
+                if decision in VALID_DECISIONS:
+                    break
+                print(f">>> '{decision}' is not a valid decision. Choose one of : {', '.join(VALID_DECISIONS)}.")
 
             # Inject the decision into state, then resume by streaming with None input.
             # Goes through the audit channel so merge_audit applies it to the substate.
@@ -101,17 +122,16 @@ async def run_gate(large: bool, durable: bool = False):
         human has already Approved the PR (GitHub holds that state) - else exit 1 to block merge.
     """
     from scripts.git_gate import (
-        in_ci, resolve_base, merge_is_clean, resolve_diff, pr_is_human_approved,
+        in_ci, resolve_base, merge_is_clean, resolve_diff,
     )
     ci = in_ci()
     base = resolve_base(ci)
 
-    if not ci:
-        ok, why = merge_is_clean(base, ci)
-        print(f">>> Merge-compatibility vs '{base}': {why}")
-        if not ok:
-            print(">>> Resolve conflicts before auditing. Aborting.")
+    if ci:
+        if escalated:
+            print("::error::Audit escalated and the PR verdict is not 'approve'. Blocking merge.")
             sys.exit(1)
+        sys.exit(0)
 
     diff = resolve_diff(demo=False, base=base)
     if durable:
@@ -122,8 +142,10 @@ async def run_gate(large: bool, durable: bool = False):
         escalated = await run_audit(diff, large=large, ci=ci)
 
     if ci:
-        if escalated and not pr_is_human_approved():
-            print("::error::Audit escalated to human review and no APPROVED review found. Blocking merge.")
+        # run_audit already consulted the PR verdict (pr_human_decision) and returns escalated=True
+        # iff the verdict is missing or not "approve". No second gh call here - one source of truth.
+        if escalated:
+            print("::error::Audit escalated and the PR verdict is not 'approve'. Blocking merge.")
             sys.exit(1)
         sys.exit(0)
 
