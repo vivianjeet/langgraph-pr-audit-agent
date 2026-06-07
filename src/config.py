@@ -15,7 +15,7 @@ load_dotenv()
 
 # ════════════════════════════ Gemini model identities (single provider) ════════════════════════════
 # The literal model names Google ships. flash-lite < flash < pro on both capability and price.
-# Used by: src/citations.py, src/compression.py, src/db/vectorstore.py, and every audit/plan node
+# Used by: src/citations.py, src/compression.py, src/db/vectorstore.py and every audit/plan node
 # (security_audit / quality_audit / coverage_audit / plan / compliance / reflexion). Day 30+ the
 # router's TIER_TABLE (src/llm_client.py) will compose its tiers from these same names.
 GEMINI_FLASH_LITE_MODEL = "gemini-2.5-flash-lite"   # cheapest triage/extraction tier (router, Day 30+)
@@ -39,7 +39,7 @@ SUMMARY_MAX_OUTPUT_TOKENS    = 1024    # src/compression.py (history-summary out
 
 # ════════════════════════════ History compression (src/compression.py) ════════════════════════════
 # All used only in src/compression.py: the trigger threshold, the fold ratio, the recent-message
-# floor, and the demo context budget the standalone pass runs against.
+# floor and the demo context budget the standalone pass runs against.
 COMPRESSION_DEMO_BUDGET_TOKENS = 10000   # context budget the demo compression pass measures against
 COMPRESSION_TRIGGER_RATIO      = 0.8     # fire compression when usage >= 80% of the budget
 COMPRESSION_FOLD_RATIO         = 0.5     # collapse the oldest 50% of the message list

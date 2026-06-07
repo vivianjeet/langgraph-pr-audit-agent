@@ -12,7 +12,7 @@ import src.config as cfg
 
 # grounded extraction over short passages, not deep reasoning. Sourced from the shared cfg.CITE_MODEL
 # knob, which the router's TIER_TABLE["cite"] (Day 30+) ALSO reads - so citations and the cite tier
-# can never drift, and either follows a single config edit.
+# can never drift; either follows a single config edit.
 CITATION_MODEL = cfg.CITE_MODEL
 
 def _norm_ws(s: str) -> str:
