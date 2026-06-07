@@ -77,21 +77,10 @@ def _is_daily_quota(exc):
     delay = _retry_delay_seconds(exc)        # no quotaId but absurd delay => daily
     return delay is not None and delay > cfg.MAX_SERVER_RETRY_WAIT_SECONDS
 
-def _is_stale_cache_handle(exc):
-    """A 403 PERMISSION_DENIED whose message is 'CachedContent not found' - the cached_content handle
-    was created on a different key/project (or expired past its TTL), NOT a dead key. Recoverable by
-    evicting the handle and re-creating, so it must NOT be treated as a blocked key (which would
-    rotate) - the cache caller catches this and re-creates."""
-    return "CachedContent not found" in str(exc)
-
-
 def _is_key_blocked(exc):
     """A 403 API_KEY_SERVICE_BLOCKED (or PERMISSION_DENIED on this key) is permanent
-    for THIS key - rotating to another key may succeed, but retrying won't. A stale-cache 403 is
-    excluded: it's recoverable on the same key by re-creating the handle, not a key problem."""
+    for THIS key - rotating to another key may succeed, but retrying won't."""
     text = str(exc)
-    if _is_stale_cache_handle(exc):
-        return False
     return "API_KEY_SERVICE_BLOCKED" in text or ("403" in text and "PERMISSION_DENIED" in text)
 
 
@@ -219,50 +208,3 @@ async def call_gemini_async(model, messages, response_model, max_output_tokens):
     return await asyncio.to_thread(
         call_gemini, model, messages, response_model, max_output_tokens
     )
-
-# --- cached (raw gemini) call shape ---
-@llm_retry
-def _raw_create_cache(model, system_instruction, ttl):
-    """Register a CachedContent on the CURRENT key, returning its handle name. Reads the module-global
-    _genai_client (NOT a captured local) so a rotation's _refresh_clients() rebind is visible here.
-    @llm_retry handles the per-minute 429s; terminal per-key errors escape to _run_with_rotation."""
-    from google.genai import types
-    cache = _genai_client.caches.create(
-        model=model,
-        config=types.CreateCachedContentConfig(system_instruction=system_instruction, ttl=ttl),
-    )
-    return cache.name
-
-@llm_retry
-def _raw_cached_generate(model, content, config):
-    """Inference against an EXISTING CachedContent on the CURRENT key (config carries cached_content).
-    Same module-global client rule as above."""
-    return _genai_client.models.generate_content(model=model, contents=content, config=config)
-
-def call_cached_generate(model, content, system_instruction, ttl, build_config, handles, cache_key_base):
-    """ONE rotation unit for the whole cached call: create-the-handle-if-needed THEN generate, so a
-    mid-call key rotation re-runs BOTH on the new key. A CachedContent is owned by the key that made
-    it, so create and generate must stay on the same key - if they were two rotation units a rotation
-    between them would strand the handle. `handles` is the caller's handle store (dict); the slot is
-    `cache_key_base` SCOPED BY THE LIVE KEY INDEX read here (NOT pre-computed by the caller): rotation
-    changes the active key DURING the call, so keying on the pre-call key would store the handle under
-    the wrong key and miss on the next run (re-creating a second handle). `build_config(handle)` turns
-    a handle into the GenerateContentConfig. Same per-minute retry + rotation + fail-closed as the
-    other call shapes."""
-    def _once():
-        cache_key = f"{cache_key_base}:{_key_idx}"   # scope to the key ACTIVE now (post any rotation)
-        name = handles.get(cache_key)
-        if name is None:
-            name = _raw_create_cache(model, system_instruction, ttl)
-            handles[cache_key] = name
-        try:
-            return _raw_cached_generate(model, content, build_config(name))
-        except Exception as e:
-            # A stale/cross-project/expired handle: drop it and re-create on THIS key, then retry once.
-            if _is_stale_cache_handle(e):
-                handles.pop(cache_key, None)
-                name = _raw_create_cache(model, system_instruction, ttl)
-                handles[cache_key] = name
-                return _raw_cached_generate(model, content, build_config(name))
-            raise
-    return _run_with_rotation(_once)

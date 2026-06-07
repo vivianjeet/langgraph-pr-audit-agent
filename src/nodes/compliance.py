@@ -7,8 +7,7 @@ import json
 from pydantic import BaseModel, Field
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.mcp_client import load_mcp_tools
-from src.llm_retry import QuotaExhaustedError
-from src.llm_client import audit_with_diff_cache
+from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.text_utils import clip
 from src.citations import cited_compliance_claims
 import src.config as cfg
@@ -89,22 +88,22 @@ async def compliance_node(state: AMSState):
         }
     
     # --- Reason: ask the model whether a lookup is warranted, and for what ---
-    # Compliance runs FIRST and sequentially, so it's the deterministic primer of the shared diff
-    # cache: its triage call goes through audit_with_diff_cache (diff cached, instructions varied),
-    # which CREATES the handle here so the later Flash diff-nodes (plan/quality/coverage) are pure
-    # reusers - no parallel create-race in the fan-out. Same model (balanced/Flash) is what lets them
-    # share ONE handle.
-    instructions = (
+    system_prompt = (
         "You triage whether a code diff touches any regulated concerns across compliance"
         " frameworks: personal data / PII (privacy: GDPR/DPDP), payment-card data "
         "(PCI-DSS), patient health data (HIPAA), authentication, money movement or "
         "audit logging. If so, propose 1-3 short search queries for a multi-framework "
-        "compliance document store. If not, set needs_lookup=False with no queries.\n"
-        "The code diff is provided in context."
+        "compliance document store. If not, set needs_lookup=False with no queries."
     )
+    messages = [
+        {"role": "system", "content" : system_prompt},
+        {"role": "user",  "content": "Diff:\n{{parsed_diff}}"
+                                .replace("{{parsed_diff}}", parsed_diff)},
+    ]
     try:
-        triage, _ = await audit_with_diff_cache(
-            parsed_diff, instructions, ComplianceQuery, cfg.COMPLIANCE_MAX_OUTPUT_TOKENS)
+        triage = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL, messages=messages,
+                                response_model=ComplianceQuery,
+                                max_output_tokens=cfg.COMPLIANCE_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:
