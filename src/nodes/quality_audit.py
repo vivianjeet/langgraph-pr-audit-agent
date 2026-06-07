@@ -2,8 +2,9 @@
 # Same ReAct pattern as the security node, so the LLM reasons before it reports.
 from pydantic import BaseModel, Field
 from src.state import QualityFinding, RuleCategory
-from src.llm_retry import call_gemini_async, QuotaExhaustedError
+from src.llm_retry import QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
+from src.llm_client import audit_with_diff_cache
 import src.config as cfg
 
 class QualityAuditOutput(BaseModel):
@@ -64,20 +65,12 @@ async def quality_audit_node(state: AMSState):
         "A rename, a small refactor, or a stylistic nit is LOW - never HIGH or CRITICAL.\n"
         "If the diff has no quality issues, return an EMPTY findings list. Do not invent findings.\n\n"
     )
-    user_prompt = (
-        "Code diff to analyze:\n"
-        "{{diff}}"
-    )
-    messages=[
-            {"role":"system","content":system_prompt
-                .replace("{{focus}}",focus)
-                .replace("{{rules}}", rules_block)},
-            {"role":"user","content": user_prompt.replace("{{diff}}", parsed_diff)}
-        ]
+    # Instructions = the rendered system prompt (the per-node VARIABLE part); the diff is cached and
+    # shared across the fan-out nodes - see audit_with_diff_cache. Falls back to plain Flash internally.
+    instructions = system_prompt.replace("{{focus}}", focus).replace("{{rules}}", rules_block)
     try:
-        response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL, messages=messages,
-                               response_model=QualityAuditOutput,
-                               max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+        response, cache_note = await audit_with_diff_cache(
+            parsed_diff, instructions, QualityAuditOutput, cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:
@@ -89,6 +82,7 @@ async def quality_audit_node(state: AMSState):
 
     new_message = (
         "System: Quality checks complete. \n"
+        f"{cache_note}"
         f"Reasoning: {response.reasoning}\n"
         f"Found {len(response.findings)} issues\n"
     )
