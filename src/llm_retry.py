@@ -10,6 +10,7 @@ import asyncio   # add to imports
 import threading 
 
 load_dotenv()
+import src.config as cfg
 log = logging.getLogger(__name__)
 
 # guards _key_idx + client rebinding under concurrent fan-out
@@ -28,7 +29,6 @@ _key_idx = 0
 
 _RETRYABLE_CODES = ("429", "500", "502", "503", "504")
 _NON_RETRYABLE_CODES = ("400", "401", "403", "404")
-_MAX_RETRY_WAIT = 90.0
 
 class QuotaExhaustedError(Exception):
     """
@@ -75,7 +75,7 @@ def _is_daily_quota(exc):
     if "PerDay" in text:
         return True
     delay = _retry_delay_seconds(exc)        # no quotaId but absurd delay => daily
-    return delay is not None and delay > _MAX_RETRY_WAIT
+    return delay is not None and delay > cfg.MAX_SERVER_RETRY_WAIT_SECONDS
 
 def _is_key_blocked(exc):
     """A 403 API_KEY_SERVICE_BLOCKED (or PERMISSION_DENIED on this key) is permanent
@@ -111,8 +111,9 @@ def _wait_server_then_backoff(retry_state):
     if exc is not None:
         delay = _retry_delay_seconds(exc)
         if delay is not None:
-            return min(delay + 1.0, _MAX_RETRY_WAIT)   # honour the 15s window, never oversleep
-    return wait_exponential(multiplier=1, min=1, max=30)(retry_state)
+            return min(delay + 1.0, cfg.MAX_SERVER_RETRY_WAIT_SECONDS)   # honour the 15s window, never oversleep
+    return wait_exponential(multiplier=1, min=cfg.RETRY_BACKOFF_MIN_SECONDS,
+                            max=cfg.RETRY_BACKOFF_MAX_SECONDS)(retry_state)
 
 def _log_before_sleep(retry_state):
     """Print why we're waiting and for how long, so a live run isn't silent."""
@@ -122,7 +123,7 @@ def _log_before_sleep(retry_state):
     server = _retry_delay_seconds(exc)            # what the server asked for, if any
     reason = f"server retryDelay={server}s" if server is not None else "exponential backoff"
     log.warning(
-        "Gemini rate-limited (attempt %d/5, %s) -> sleeping %.1fs before retry. Last error: %s",
+        f"Gemini rate-limited (attempt %d/{cfg.RETRY_MAX_ATTEMPTS}, %s) -> sleeping %.1fs before retry. Last error: %s",
         attempt, reason, wait, str(exc)[:120],
     )
 
@@ -144,7 +145,7 @@ def _rotate_from(failed_idx: int) -> bool:
         return False                         # this was the last key and it's still current → exhausted
 
 llm_retry = retry(
-    stop=stop_after_attempt(5),
+    stop=stop_after_attempt(cfg.RETRY_MAX_ATTEMPTS),
     wait=_wait_server_then_backoff,
     retry=retry_if_exception(_is_retryable),
     before_sleep=_log_before_sleep,
@@ -176,7 +177,7 @@ def _run_with_rotation(fn):
 def _raw_chat(model, messages, response_model, max_output_tokens):
     return _client.chat.completions.create(
         model=model, messages=messages, response_model=response_model,
-        max_retries=2, generation_config={"max_output_tokens": max_output_tokens},
+        max_retries=cfg.INSTRUCTOR_MAX_RETRIES, generation_config={"max_output_tokens": max_output_tokens},
     )
 
 

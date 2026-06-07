@@ -1,5 +1,6 @@
 from unittest.mock import patch, MagicMock
 import src.db.vectorstore as vs
+import src.config as cfg
 
 
 def test_cosine_basics():
@@ -36,8 +37,8 @@ def test_retrieve_drops_near_duplicate():
 
 
 def test_retrieve_respects_threshold():
-    # A row at/below SIM_THRESHOLD is filtered out entirely (unchanged behaviour).
-    rows = [_row("low", [1.0, 0.0], vs.SIM_THRESHOLD - 0.01)]
+    # A row at/below SIMILARITY_THRESHOLD is filtered out entirely (unchanged behaviour).
+    rows = [_row("low", [1.0, 0.0], cfg.SIMILARITY_THRESHOLD - 0.01)]
     cur = MagicMock(); cur.fetchall.return_value = rows
     conn = MagicMock(); conn.cursor.return_value.__enter__.return_value = cur
     with patch.object(vs, "embed", return_value=[1.0, 0.0]), \

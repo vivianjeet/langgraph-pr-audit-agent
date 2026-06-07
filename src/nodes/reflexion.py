@@ -3,9 +3,7 @@ from pydantic import BaseModel, Field
 from src.llm_retry import call_gemini, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.state import REFLEXION_SIGNAL_PREFIXES as RELEVANT_PREFIXES
-
-SMART_MODEL = "gemini-2.5-pro"
-MEDIUM_TOKEN_COUNT = 6000
+import src.config as cfg
 
 
 class ReflectionOutput(BaseModel):
@@ -78,9 +76,9 @@ def reflexion_node(state: AMSState):
             {"role" : "user", "content" : user_prompt}
         ]
     try:
-        critique = call_gemini(model=SMART_MODEL, messages=messages,
+        critique = call_gemini(model=cfg.GEMINI_PRO_MODEL, messages=messages,
                                response_model=ReflectionOutput,
-                               max_output_tokens=MEDIUM_TOKEN_COUNT)
+                               max_output_tokens=cfg.REFLEXION_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:

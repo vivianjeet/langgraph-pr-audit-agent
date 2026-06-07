@@ -8,9 +8,12 @@
 import re
 from pydantic import BaseModel, Field
 from src.llm_retry import call_gemini, QuotaExhaustedError
+import src.config as cfg
 
-CITATION_MODEL = "gemini-2.5-flash" # grounded extraction over short passages, not deep reasoning
-CITATION_TOKENS = 1024
+# grounded extraction over short passages, not deep reasoning. Sourced from the shared cfg.CITE_MODEL
+# knob, which the router's TIER_TABLE["cite"] (Day 30+) ALSO reads - so citations and the cite tier
+# can never drift, and either follows a single config edit.
+CITATION_MODEL = cfg.CITE_MODEL
 
 def _norm_ws(s: str) -> str:
     """Collapse any run of whitespace to a single space and trim the ends. The substring check
@@ -58,7 +61,7 @@ def cited_compliance_claims(diff: str, passages: list[dict]) -> list[dict]:
             .replace("{{catalogue}}", catalogue).replace("{{diff}}", diff)},
     ]
     try: out = call_gemini(model=CITATION_MODEL, messages=messages, response_model=_CitedClaims,
-                           max_output_tokens=CITATION_TOKENS)
+                           max_output_tokens=cfg.CITATION_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception:

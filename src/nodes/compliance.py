@@ -10,6 +10,7 @@ from src.mcp_client import load_mcp_tools
 from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.text_utils import clip
 from src.citations import cited_compliance_claims
+import src.config as cfg
 
 
 def _coerce(item):
@@ -52,8 +53,6 @@ def _normalize_hits(result) -> list[dict]:
         result = [result]
     return [d for d in (_coerce(i) for i in (result or [])) if d is not None]
 
-FAST_MODEL = "gemini-2.5-flash"
-COMPLIANCE_TOKENS = 2000
 
 class ComplianceQuery(BaseModel):
     """LLM triage of whether the diff is regulated, and what to search for."""
@@ -102,9 +101,9 @@ async def compliance_node(state: AMSState):
                                 .replace("{{parsed_diff}}", parsed_diff)},
     ]
     try:
-        triage = await call_gemini_async(model=FAST_MODEL, messages=messages,
+        triage = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL, messages=messages,
                                 response_model=ComplianceQuery,
-                                max_output_tokens=COMPLIANCE_TOKENS)
+                                max_output_tokens=cfg.COMPLIANCE_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:
@@ -136,9 +135,9 @@ async def compliance_node(state: AMSState):
             
         }
     hits = []
-    for q in triage.queries[:3]:
+    for q in triage.queries[:cfg.MAX_COMPLIANCE_QUERIES]:
         try:
-            result = await search.ainvoke({"query":q, "k":3})
+            result = await search.ainvoke({"query":q, "k":cfg.SEARCH_DEFAULT_K})
         except Exception:
             continue
         hits.extend(_normalize_hits(result))
@@ -149,7 +148,7 @@ async def compliance_node(state: AMSState):
         cited = []
     
     # --- Observe: surface a trace line + carry the passages for the security prompt. ---
-    lines = [f"- [{h.get('framework', '?')}] {clip(h.get('text', ''), 160)} (src: {h.get('source', '?')})"
+    lines = [f"- [{h.get('framework', '?')}] {clip(h.get('text', ''), cfg.CLIP_WIDTH_LONG)} (src: {h.get('source', '?')})"
              for h in hits]
     msg = ("System: Compliance context:\n" + "\n".join(lines)) if lines else \
           "System: Compliance - no matching passages above threshold."

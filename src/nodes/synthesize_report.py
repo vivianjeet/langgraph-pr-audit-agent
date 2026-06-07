@@ -1,15 +1,6 @@
-from src.state import Severity
 from src.memory import AgentMemorySystem as AMS, AMSState
+import src.config as cfg
 
-
-_SEVERITY_PENALTY = {
-    Severity.CRITICAL: 0.6,
-    Severity.HIGH: 0.3,
-    Severity.MEDIUM: 0.15,
-    Severity.LOW: 0.07,
-    Severity.INFO: 0.02,
-    Severity.NONE: 0.0
-}
 
 def _weighted_score(findings) -> float:
     """1.0 = clean. Each finding MULTIPLICATIVELY erodes the remaining score, so several moderate
@@ -23,7 +14,7 @@ def _weighted_score(findings) -> float:
         return 1.0
     score = 1.0
     for f in findings:
-        score *= (1.0 - _SEVERITY_PENALTY.get(f.severity, 0.0))
+        score *= (1.0 - cfg.SEVERITY_PENALTY.get(f.severity, 0.0))
     return round(score, 2)
 
 def synthesize_report_node(state: AMSState):

@@ -4,9 +4,7 @@ from pydantic import BaseModel, Field
 from src.state import SecurityFinding, RuleCategory
 from src.llm_retry import call_gemini_async, QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
-
-FAST_MODEL = "gemini-2.5-flash"
-SMALL_TOKEN_COUNT = 4000
+import src.config as cfg
 
 class SecurityAuditOutput(BaseModel):
     reasoning: str = Field(
@@ -94,9 +92,9 @@ async def security_audit_node(state: AMSState):
         {"role": "user", "content": user_prompt.replace("{{diff}}",parsed_diff)},
     ]
     try:
-        response = await call_gemini_async(model=FAST_MODEL,messages=messages,
+        response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,messages=messages,
                                response_model=SecurityAuditOutput,
-                               max_output_tokens=SMALL_TOKEN_COUNT)
+                               max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:

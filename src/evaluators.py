@@ -3,6 +3,7 @@
 from langsmith.evaluation import evaluate
 
 from src.state import Severity
+from src.config import LOW_SCORE_THRESHOLD
 
 def every_finding_has_cwe(run, example) -> dict:
     """Security traceability: every security finding MUST carry a CWE id."""
@@ -18,7 +19,7 @@ def score_consistent_with_findings(run, example) -> dict:
         getattr(f, "severity", None) == Severity.CRITICAL
         for f in out.get("security_findings", [])
     )
-    consistent = not (has_critical and score >= 0.5)
+    consistent = not (has_critical and score >= LOW_SCORE_THRESHOLD)
     return {"key": "score_consistency", "score" : 1.0 if consistent else 0.0}
 
 if __name__ == "__main__":

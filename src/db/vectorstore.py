@@ -1,7 +1,6 @@
 # pgvector access layer: ember text, init schema (HNSW), 
 # store + retrieve similar PR audits.
 
-import os
 import json
 from functools import lru_cache
 import psycopg
@@ -9,17 +8,9 @@ from pgvector.psycopg import register_vector
 from src.llm_retry import call_embed, QuotaExhaustedError
 from dotenv import load_dotenv
 from src.state import RuleStatus, RuleCategory
+import src.config as cfg
 
 load_dotenv()
-
-DATABASE_URL = os.environ.get("DATABASE_URL")
-EMBED_MODEL = "gemini-embedding-001" # 768-dim by default
-EMBED_DIM = 768
-
-HNSW_M = 16
-HNSW_EF_CONSTRUCTION = 64
-HNSW_EF_SEARCH = 100
-SIM_THRESHOLD = 0.7 # cosine similarity; distance = 1 - sim, so we keep distance < 0.3
 
 # Build the SQL CHECK list from the enum so the column constraint and the
 # Python type can never drift apart.
@@ -35,7 +26,7 @@ _RED = "\033[91m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=cfg.EMBED_CACHE_SIZE)
 def _embed_cached(text: str) -> tuple[float, ...]:
     """Memoised single-text embed. Bounded (256 * ~768 floats) so it can't grow
     without limit. Returns an immutable tuple so a cached vector can't be mutated
@@ -47,9 +38,9 @@ def _embed_cached(text: str) -> tuple[float, ...]:
     per-node), so the dedupe has to live HERE, at the embedding layer, not on AMS.
     """
     resp = call_embed(
-        model=EMBED_MODEL,
+        model=cfg.GEMINI_EMBED_MODEL,
         contents=[text],
-        output_dim=EMBED_DIM
+        output_dim=cfg.EMBED_OUTPUT_DIM
     )
     return tuple(resp.embeddings[0].values)
 
@@ -69,15 +60,13 @@ def embed_cache_clear() -> None:
     _embed_cached.cache_clear()
 
 # Gemini's embed endpoint caps how many texts ( and total tokens) one call accepts,
-# so we send the corpus in groups of EMBED_BATCH instead of one giant request
-EMBED_BATCH = 100
-
+# so we send the corpus in groups of cfg.EMBED_BATCH_SIZE instead of one giant request
 def embed_batch(texts: list[str]) -> list[list[float]]:
     """
     Embed many texts with the fewest network round-trips
     
     Single-text `embed()` does one HTTP call per text wasteful for large corpus
-    This batches `contents` (one call per EMBED_BATCH texts) and preserves input order
+    This batches `contents` (one call per cfg.EMBED_BATCH_SIZE texts) and preserves input order
     result[i] is the vector for texts[i]. Returns [] for every empty input
     """
 
@@ -85,12 +74,12 @@ def embed_batch(texts: list[str]) -> list[list[float]]:
         return []
     
     vectors: list[list[float]] = []
-    for start in range(0, len(texts), EMBED_BATCH):
-        batch = texts[start:start + EMBED_BATCH]
+    for start in range(0, len(texts), cfg.EMBED_BATCH_SIZE):
+        batch = texts[start:start + cfg.EMBED_BATCH_SIZE]
         resp = call_embed(
-            model=EMBED_MODEL,
+            model=cfg.GEMINI_EMBED_MODEL,
             contents=batch,
-            output_dim=EMBED_DIM
+            output_dim=cfg.EMBED_OUTPUT_DIM
         )
 
         # Defensive : the API must return one embedding per input, in order.
@@ -105,7 +94,7 @@ def init_schema():
     """
     Create the extension, table and HNSW index. Idempotent - safe to re run.
     """
-    with psycopg.connect(DATABASE_URL, connect_timeout=5) as conn, conn.cursor() as cur:
+    with psycopg.connect(cfg.DATABASE_URL, connect_timeout=cfg.DB_CONNECT_TIMEOUT_SECONDS) as conn, conn.cursor() as cur:
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
         conn.commit()
 
@@ -116,7 +105,7 @@ def init_schema():
                 id          BIGSERIAL PRIMARY KEY,
                 pr_summary  TEXT NOT NULL,
                 report      JSONB NOT NULL,
-                embedding   VECTOR({EMBED_DIM}) NOT NULL,
+                embedding   VECTOR({cfg.EMBED_OUTPUT_DIM}) NOT NULL,
                 created_at  TIMESTAMPTZ DEFAULT now()
             );
             """
@@ -125,7 +114,7 @@ def init_schema():
             f"""
             CREATE INDEX IF NOT EXISTS pr_audits_embedding_hnsw
             ON pr_audits USING hnsw (embedding vector_cosine_ops)
-            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            WITH (m = {cfg.HNSW_M}, ef_construction = {cfg.HNSW_EF_CONSTRUCTION});
             """
         )
 
@@ -137,7 +126,7 @@ def init_schema():
                 id           SERIAL PRIMARY KEY,
                 summary      TEXT NOT NULL,
                 metadata     JSONB,
-                embedding    VECTOR({EMBED_DIM}) NOT NULL,
+                embedding    VECTOR({cfg.EMBED_OUTPUT_DIM}) NOT NULL,
                 created_at   TIMESTAMPTZ DEFAULT now()
             );
             """
@@ -146,7 +135,7 @@ def init_schema():
             f"""
             CREATE INDEX IF NOT EXISTS session_episodes_embedding_hnsw
             ON session_episodes USING hnsw (embedding vector_cosine_ops)
-            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            WITH (m = {cfg.HNSW_M}, ef_construction = {cfg.HNSW_EF_CONSTRUCTION});
             """
         )
 
@@ -161,7 +150,7 @@ def init_schema():
                 content      TEXT NOT NULL,
                 status       TEXT NOT NULL
                     CHECK (status IN ({_RULE_STATUS_VALUES})),
-                embedding    VECTOR({EMBED_DIM}) NOT NULL,
+                embedding    VECTOR({cfg.EMBED_OUTPUT_DIM}) NOT NULL,
                 source_decision TEXT,
                 created_at   TIMESTAMPTZ DEFAULT now(),
                 updated_at   TIMESTAMPTZ DEFAULT now()
@@ -184,7 +173,7 @@ def init_schema():
             f"""
             CREATE INDEX IF NOT EXISTS procedural_rules_embedding_hnsw
             ON procedural_rules USING hnsw (embedding vector_cosine_ops)
-            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            WITH (m = {cfg.HNSW_M}, ef_construction = {cfg.HNSW_EF_CONSTRUCTION});
             """
         )
         # Compliance corpus: multi-framework regulatory passages (RBI, HIPAA, PCI-DSS, 
@@ -199,7 +188,7 @@ def init_schema():
                 content     TEXT NOT NULL,
                 source      TEXT NOT NULL,
                 framework   TEXT NOT NULL,
-                embedding   VECTOR({EMBED_DIM}) NOT NULL,
+                embedding   VECTOR({cfg.EMBED_OUTPUT_DIM}) NOT NULL,
                 created_at  TIMESTAMPTZ DEFAULT now()
             );
             """
@@ -208,7 +197,7 @@ def init_schema():
             f"""
             CREATE INDEX IF NOT EXISTS compliance_docs_embedding_hnsw
             ON compliance_docs USING hnsw (embedding vector_cosine_ops)
-            WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
+            WITH (m = {cfg.HNSW_M}, ef_construction = {cfg.HNSW_EF_CONSTRUCTION});
             """
         )
         # Plain btree on framework: cheap WHERE framework = ... filtering for single-pack searches.
@@ -221,7 +210,7 @@ def get_conn():
     """
     Open a pgvector-registered connection. Caller is responsible for closing.
     """
-    conn = psycopg.connect(DATABASE_URL, connect_timeout=5)
+    conn = psycopg.connect(cfg.DATABASE_URL, connect_timeout=cfg.DB_CONNECT_TIMEOUT_SECONDS)
     register_vector(conn)
     return conn
 
@@ -253,7 +242,7 @@ def _cosine(a, b) -> float:
     nb = sum(y * y for y in b) ** 0.5
     return dot / (na * nb) if na and nb else 0.0
 
-def retrieve_similar_prs(query_text: str, k: int = 3) -> list[dict]:
+def retrieve_similar_prs(query_text: str, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
     """
     Return up to `k` past audits with cosine similarity > SIM_THRESHOLD, DE-DUPLICATED.
     A PR that evolved (needs-changes -> fix -> approve) leaves several near-identical rows;
@@ -265,7 +254,7 @@ def retrieve_similar_prs(query_text: str, k: int = 3) -> list[dict]:
     vec = embed(query_text)
     over_fetch = max(k * 4, 10)          # wider net so we can drop dupes and still fill k
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH};")
+        cur.execute(f"SET hnsw.ef_search = {cfg.HNSW_EF_SEARCH};")
         cur.execute(
             """
             SELECT pr_summary, report, embedding, 1 - (embedding <=> %s::vector) AS similarity
@@ -282,7 +271,7 @@ def retrieve_similar_prs(query_text: str, k: int = 3) -> list[dict]:
     kept_vecs: list = []
     for pr_summary, report, emb, sim in rows:
         sim = float(sim)
-        if sim <= SIM_THRESHOLD:
+        if sim <= cfg.SIMILARITY_THRESHOLD:
             continue
         if any(_cosine(emb, kv) > _PRECEDENT_DEDUP_SIM for kv in kept_vecs):
             continue                     # near-dup of an already-kept precedent -> skip
@@ -292,13 +281,13 @@ def retrieve_similar_prs(query_text: str, k: int = 3) -> list[dict]:
             break
     return kept
 
-def search_compliance(query_text: str, k: int = 3, framework: str | None = None) -> list[dict]:
+def search_compliance(query_text: str, k: int = cfg.SEARCH_DEFAULT_K, framework: str | None = None) -> list[dict]:
     """Return up to `k` compliance passages with cosine similarity > SIM_THRESHOLD.
     Mirrors retrieve_similar_prs: embed the query, HNSW cosine search, strict threshold.
     `framework` is an optional filter (e.g. 'hipaa') - None searches every pack."""
     vec = embed(query_text)
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH};")
+        cur.execute(f"SET hnsw.ef_search = {cfg.HNSW_EF_SEARCH};")
         if framework:
             cur.execute(
                 """
@@ -324,7 +313,7 @@ def search_compliance(query_text: str, k: int = 3, framework: str | None = None)
     return [
         {"text": r[0], "source": r[1], "framework": r[2], "similarity": float(r[3])}
         for r in rows
-        if float(r[3]) > SIM_THRESHOLD
+        if float(r[3]) > cfg.SIMILARITY_THRESHOLD
     ]
 
 # --- Episodic memory ( session summaries ) ---
@@ -340,7 +329,7 @@ def store_episode(summary: str, metadata: dict | None = None) -> None:
         )
         conn.commit()
 
-def retrieve_episodes(query_text: str, k: int = 3) -> list[dict]:
+def retrieve_episodes(query_text: str, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
     """
     Return upto `k` past session summaries with cosine similarity > SIM_THRESHOLD.
     """
@@ -359,7 +348,7 @@ def retrieve_episodes(query_text: str, k: int = 3) -> list[dict]:
         return [
             {"summary": r[0], "metadata": r[1], "similarity": float(r[2])}
             for r in rows
-            if float(r[2]) > SIM_THRESHOLD
+            if float(r[2]) > cfg.SIMILARITY_THRESHOLD
         ]
 
 # --- Procedural memory (org rules / templates) ---
@@ -453,7 +442,7 @@ def delete_rule(rule_id: int) -> None:
         conn.commit()
 
 
-def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
+def similar_rules(rule_id: int, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
     """For the review CLI's near-duplicate hint: given a pending rule's id, return up to k
     OTHER rules (any status, excluding the rule itself) most similar by cosine over the
     stored embedding. Reuses the pending rule's already-stored vector - no re-embed.
@@ -464,7 +453,7 @@ def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
     Repo 2 (RAGAS). The CLI never acts on this score - the human approval gate is the real dedup,
     so a wrong threshold only costs a human a second glance, never a wrong deletion."""
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(f"SET hnsw.ef_search = {HNSW_EF_SEARCH};")
+        cur.execute(f"SET hnsw.ef_search = {cfg.HNSW_EF_SEARCH};")
         cur.execute(
             """
             SELECT id, status, content,
@@ -480,10 +469,10 @@ def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
     return [
         {"id": r[0], "status": r[1], "content": r[2], "similarity": float(r[3])}
         for r in rows
-        if float(r[3]) > SIM_THRESHOLD
+        if float(r[3]) > cfg.SIMILARITY_THRESHOLD
     ]
 
-    
+
 # ----- DANGER !! MURDER THE DB ---------------
 def drop_schema() -> None:
     """

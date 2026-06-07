@@ -17,6 +17,7 @@
 from typing import Annotated, TypedDict
 from src.state import AuditState, RuleCategory, RuleStatus
 from src.db import vectorstore as vs
+import src.config as cfg
 
 _NO_LEARN = {"needs-changes", "reject"}
 
@@ -86,7 +87,7 @@ class AgentMemorySystem:
 
     # ---- 2. Semantic memory ( similar past PR audits ) ----
     @staticmethod
-    def recall_similar_prs(diff_text: str, k: int = 3) -> list[dict]:
+    def recall_similar_prs(diff_text: str, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
         return vs.retrieve_similar_prs(diff_text, k=k)
 
     @staticmethod
@@ -95,7 +96,7 @@ class AgentMemorySystem:
 
     # ---- 3. Episodic memory ( compressed session summaries ) ----
     @staticmethod
-    def recall_episodes(query_text: str, k: int = 3) -> list[dict]:
+    def recall_episodes(query_text: str, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
         return vs.retrieve_episodes(query_text, k=k)
 
     @staticmethod
@@ -121,7 +122,7 @@ class AgentMemorySystem:
         return vs.list_active_rules()
 
     @staticmethod
-    def similar_rules(rule_id: int, k: int = 3) -> list[dict]:
+    def similar_rules(rule_id: int, k: int = cfg.SEARCH_DEFAULT_K) -> list[dict]:
         return vs.similar_rules(rule_id, k=k)
 
     @staticmethod
