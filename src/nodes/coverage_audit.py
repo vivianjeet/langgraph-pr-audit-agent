@@ -50,8 +50,18 @@ async def coverage_audit_node(state: AMSState):
         "Identify code paths that changed but have NO corresponding test, focusing on: "
         "- Payment / transaction logic (must have edge-case + failure tests)\n"
         "- Authentication / authorization changes\n"
-        "- Input validation and error handling\n"
-        "A new function with no test is a finding. A bug-fix with no regression test is a finding.\n\n"
+        "- Input validation and error handling\n\n"
+        "A new function with no test is a finding. A bug-fix with no regression test is a finding.\n"
+        "CONSOLIDATE: do NOT emit one finding per function or per line. Group related gaps "
+        "into a single finding - e.g. 'Service has 60 new methods with no tests' is ONE finding, "
+        "not 60. Emit at most a handful of findings, highest-impact first.\n\n"
+        "Assign each finding a severity using THIS scale for TEST COVERAGE, and do not inflate it:\n"
+        "- CRITICAL: an untested security- or payment-critical path (auth, money movement, PII handling).\n"
+        "- HIGH: untested core business logic that can fail silently.\n"
+        "- MEDIUM: missing tests on ordinary changed code.\n"
+        "- LOW: trivial/boilerplate code where a test adds little (renames, pass-through methods).\n"
+        "If every changed path is adequately tested, return an EMPTY findings list. Do not invent gaps.\n\n"
+
     )
     user_prompt = (
         "Code diff to analyze:\n"

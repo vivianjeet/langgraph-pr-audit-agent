@@ -29,7 +29,8 @@ def _finding(severity):
                            line_number=42,
                            description="Raw SQl from user input.",
                            cwe_id="CWE-89",
-                           severity=severity)
+                           severity=severity,
+                           title="SQL injection")
 
 @pytest.mark.parametrize("severity", [Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM])
 def test_security_audit_passes_through_findings(patched_create, vuln_diff, severity):
