@@ -15,6 +15,7 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 
 **LLM & structured output**
 - **Gemini 2.5 Flash (audits) + Gemini 2.5 Pro (reflexion):** Core LLM reasoning engine (via `google-genai`).
+- **Model-tier router + context caching:** Nodes pick a model by *tier* through one router (`UnifiedLLMClient`); the shared diff is cached once per audit and reused across the Flash nodes (~74% input-cost cut on a large diff, verified live). See [Model tiers & context caching](#model-tiers--context-caching).
 - **Instructor:** Enforces strict structured outputs (Pydantic V2 schemas) - no hand-rolled JSON parsing.
 
 **Memory & retrieval** - see [Agent Memory](#agent-memory-four-types-one-system)
@@ -116,6 +117,45 @@ Every Gemini call routes through `src/llm_retry.py`, which:
 - If an audit node degrades (transient API error), it records to `node_errors`; `synthesize`
   forces all scores to `0.0` when an audit actually failed, so a transport failure can never
   masquerade as a clean PR. **A failure is never a false pass.**
+
+---
+
+## Model tiers & context caching
+
+Every node selects its model by **tier**, not by a hard-coded name, through one router
+(`UnifiedLLMClient` in `src/llm_client.py`): `balanced` → Gemini 2.5 Flash, `powerful` → Gemini 2.5
+Pro. The router sits on the same retry/rotation spine, records which tier actually served each call,
+and on a total quota exhaustion re-raises `QuotaExhaustedError` as itself so the fail-closed contract
+survives the abstraction. Sequential nodes call `llm.call(...)` (sync); the parallel fan-out calls
+`llm.acall(...)` (async) - same tier table, same fallback, the split is only about the event loop.
+
+### Caching the diff (per-PR)
+
+In one audit the **same diff** is sent by several Flash nodes - compliance, plan, quality and
+coverage - while each node's *instructions* differ. So the diff is registered **once** as a Gemini
+`CachedContent` and reused across those nodes; each one sends only its own instructions fresh.
+**`compliance` runs first and primes the handle**, so the parallel quality/coverage calls are pure
+reusers - there's no create-race. The four share one handle because they share one model (a
+`CachedContent` is model-bound).
+
+There's a floor on when this is worth it. A repeat read is billed at ~25% of the input rate, so the
+saving scales with how many tokens get *reused*, and Gemini rejects any cache under **2,048 tokens**.
+Below that the node just falls back to a plain Flash call - no cache, no penalty, and the caller
+never has to branch. The diff clears the floor on large PRs, which is exactly where you want the
+saving. Measured on a 3,000-token diff at the published Pro rate ($1.25/1M input, cached
+reads at 25%), reusing the diff cut the **input cost ~74%** on each reusing node, verified live via
+`cached_content_token_count > 0` on the repeat call - the claim is never made without that field
+proving the cache actually engaged.
+
+### Caching the prefix (cross-PR, for batch)
+
+`security_audit` caches the *opposite* axis: its stable system **prefix** (instructions + rules +
+compliance), which is byte-identical across *different* PRs of the same corpus. That's the cross-PR
+optimization - it pays when many PRs are audited inside the 5-minute cache window (batch runs, a busy
+review queue), not on a single audit. Security runs on Pro, so it can't share the Flash diff-handle
+regardless. Today the prefix is usually under the 2,048-token floor, so this path falls back to Flash
+until the rule/compliance corpus grows past it - a deliberate, documented forward-looking path rather
+than a live saving.
 
 ---
 
