@@ -102,22 +102,6 @@ def test_diff_cache_helper_caches_diff_and_returns_note():
     assert "Cache(diff): read=900" in note
 
 
-def test_diff_cache_helper_routes_through_router():
-    # The fan-out helper must reach Gemini via llm.acall(cache=True) (so the call is tier-resolved +
-    # traced), NOT a side-door _acall_cached. Pins the Day-34 routing change.
-    from pydantic import BaseModel
-    class _Out(BaseModel):
-        ok: bool
-    captured = {}
-    async def _fake_acall(tier, *, messages, response_model, max_output_tokens, cache=False, thinking=0):
-        captured.update(tier=tier, cache=cache)
-        return lc.LLMResult(output='{"ok": true}', model="gemini-2.5-flash", cache_read_tokens=900)
-    with patch.object(lc.llm, "acall", side_effect=_fake_acall):
-        parsed, note = asyncio.run(lc.audit_with_diff_cache("THE-DIFF", "INSTRUCTIONS", _Out, 500))
-    assert parsed.ok is True
-    assert captured["cache"] is True and captured["tier"] == "balanced"
-
-
 def test_diff_cache_helper_falls_back_when_cache_fails():
     # diff too small / any cache error -> plain Flash, empty note, identical result shape.
     from pydantic import BaseModel
@@ -134,18 +118,20 @@ def test_diff_cache_helper_falls_back_when_cache_fails():
     assert note == ""                                    # no cache note on the fallback path
 
 
-def test_sync_router_cache_flag_routes_to_cached_path():
-    # call(cache=True) is the sync twin of acall(cache=True): it must reach the same _cached_call core
-    # (the plan node's path, replacing the old audit_with_diff_cache_sync helper).
+def test_diff_cache_sync_helper_reuses_same_core():
+    # The SYNC twin (plan) hits the same _cached_call core + same _CACHE_HANDLES as the async one,
+    # so it reuses whatever handle compliance primed. Here we just prove it returns (parsed, note).
+    from pydantic import BaseModel
+    class _Out(BaseModel):
+        ok: bool
     def _cached_call(model, stable, user_content, max_tok, response_schema=None):
         assert stable == "THE-DIFF" and user_content == "INSTR"
-        return lc.LLMResult(output='{"ok": true}', model="gemini-2.5-flash", cache_read_tokens=700)
-    with patch.object(lc, "_cached_call", side_effect=_cached_call) as c:
-        res = lc.UnifiedLLMClient().call(
-            tier="balanced", cache=True,
-            messages=[lc.cached_diff("THE-DIFF"), {"role": "user", "content": "INSTR"}])
-    c.assert_called_once()                               # the sync flag is wired through the public method
-    assert res.cache_read_tokens == 700
+        return lc.LLMResult(output='{"ok": true}', model="gemini-2.5-flash",
+                            cache_read_tokens=700, input_tokens=800, output_tokens=10)
+    with patch.object(lc, "_cached_call", side_effect=_cached_call):
+        parsed, note = lc.audit_with_diff_cache_sync("THE-DIFF", "INSTR", _Out, 500)
+    assert parsed.ok is True
+    assert "Cache(diff): read=700" in note
 
 
 def test_router_cache_flag_routes_to_cached_path():

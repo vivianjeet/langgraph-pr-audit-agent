@@ -25,16 +25,14 @@ def test_calls_actually_overlap():
                              qual.quality_audit_node(state),
                              cov.coverage_audit_node(state))
         return time.perf_counter() - t0
-    # NOTE: security's unregulated path now routes through llm.acall (res.output is the parsed model);
-    # quality+coverage go through audit_with_diff_cache. Patch each node's actual LLM entry so no real
-    # LLM is hit and each sleeps 0.3s on a worker thread - the overlap assertion is unchanged.
-    class _Res:
-        output = _Out()
-    async def _fake_acall(*a, **k):
-        await asyncio.sleep(0.3); return _Res()
+    # NOTE: security still calls call_gemini_async (its Flash fallback); quality+coverage now go
+    # through audit_with_diff_cache. Patch each node's actual LLM entry so no real LLM is hit and
+    # each sleeps 0.3s on a worker thread - the overlap assertion is unchanged.
+    async def _fake_async(*a, **k):
+        await asyncio.sleep(0.3); return _Out()
     async def _fake_helper(*a, **k):
         await asyncio.sleep(0.3); return _Out(), ""          # (parsed, cache_note)
-    with patch.object(sec.llm, "acall", _fake_acall), \
+    with patch.object(sec, "call_gemini_async", _fake_async), \
          patch.object(qual, "audit_with_diff_cache", _fake_helper), \
          patch.object(cov, "audit_with_diff_cache", _fake_helper):
         elapsed = asyncio.run(_run())

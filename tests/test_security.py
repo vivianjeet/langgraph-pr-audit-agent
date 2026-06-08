@@ -58,15 +58,12 @@ def test_security_audit_hits_real_llm(vuln_diff):
     assert isinstance(out["audit"]["security_findings"], list)
 
 def test_security_audit_falls_back_on_nonretryable_error(patched_create):
-    # Unregulated diff now routes through the router (llm.acall tier='balanced'), so a non-retryable
-    # error walks the balanced->fast fallback chain (_raw_chat fires on Flash then Flash-Lite). What
-    # matters is the OUTCOME: all tiers exhausted -> empty findings + a node_error recorded.
-    patched_create.side_effect = RuntimeError("boom")
+    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
     out = asyncio.run(
         sec_mod.security_audit_node({"audit": {"parsed_diff": "x", "messages": []}})
     )
+    patched_create.assert_called_once()
     assert out["audit"]["security_findings"] == []
-    assert out["audit"]["node_errors"]                           # the failure was recorded
 
 def test_security_audit_degrades_on_transient_error(patched_create):
     patched_create.side_effect = RuntimeError("503 Service Unavailable")
