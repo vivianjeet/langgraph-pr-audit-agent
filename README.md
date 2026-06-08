@@ -844,7 +844,7 @@ multi-step agent debuggable - when a score looks wrong you can see *which* node 
 > LangSmith auto-instruments the **graph**: it traces the LangGraph run node-by-node (prompt,
 > model, structured output per node) and powers the output-quality evaluators below - that is its
 > job, and it needs zero application code. Langfuse traces the **router's economics**: at the
-> router's single callback it logs per-tier cost, token usage, latency, and fallback events, and
+> router's single callback it logs per-tier cost, token usage, latency and fallback events, and
 > attaches each run's three dimension scores to one trace (see [Cost tracking](#cost-tracking-langfuse)).
 > One answers *"which node produced this and why"*; the other answers *"what did this run cost, on
 > which tier, and how good was it"*. Both stay vendor-neutral on the Gemini stack.

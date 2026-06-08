@@ -77,7 +77,7 @@ async def security_audit_node(state: AMSState):
         "(e.g. missing authz check, sensitive data exposure).\n"
         "- MEDIUM: a hardening gap or defence-in-depth issue, not directly exploitable.\n"
         "- LOW: minor / informational.\n"
-        "Only report ACTUAL security issues. A rename, refactor, or non-security change has NO "
+        "Only report ACTUAL security issues. A rename, refactor or non-security change has NO "
         "security findings - return an EMPTY list. Do not invent vulnerabilities.\n\n"
 
     )
