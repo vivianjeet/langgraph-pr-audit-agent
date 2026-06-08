@@ -31,7 +31,8 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 - **Resilience layer (`src/llm_retry.py`, `tenacity`):** Centralized retry / server-directed backoff / multi-key rotation across every Gemini call, **thread-safe** under the concurrent fan-out, with fail-closed semantics. Classifies a 429 by its cause - per-minute throttle (wait the server's stated delay), per-day quota or depleted billing credits (rotate keys), blocked key (rotate immediately) - never one blunt retry policy.
 
 **Observability & ops**
-- **LangSmith:** Tracing + custom output-quality evaluators.
+- **LangSmith:** Graph tracing (node-by-node) + custom output-quality evaluators.
+- **Langfuse:** Per-tier cost (by type), latency and fallback events logged at the router's single callback, plus each run's three scores on one trace - read back with `scripts/cost_report.py` / `scripts/score_report.py`.
 - **GitHub Actions:** A free test job on every PR plus an opt-in [pre-merge audit gate](#continuous-integration-audit-on-every-pr) that blocks merge on an unaddressed critical finding.
 
 ---
@@ -839,13 +840,63 @@ trace; drill into any node to see its prompt and structured output. This is what
 multi-step agent debuggable - when a score looks wrong you can see *which* node produced it and
 *why*, instead of guessing from the final report.
 
-> **Why LangSmith here, and not a second backend?** LangSmith covers both tracing *and* the
-> output-quality evaluators below, so it earns its place. A self-hostable backend (Langfuse) is
-> deferred to a dedicated self-hosted Docker stack, where the "zero data egress / regulated
-> deployment" story is built properly - rather than bolting a redundant second tracer onto this repo.
+> **LangSmith and Langfuse trace different layers - they are complementary, not redundant.**
+> LangSmith auto-instruments the **graph**: it traces the LangGraph run node-by-node (prompt,
+> model, structured output per node) and powers the output-quality evaluators below - that is its
+> job, and it needs zero application code. Langfuse traces the **router's economics**: at the
+> router's single callback it logs per-tier cost, token usage, latency, and fallback events, and
+> attaches each run's three dimension scores to one trace (see [Cost tracking](#cost-tracking-langfuse)).
+> One answers *"which node produced this and why"*; the other answers *"what did this run cost, on
+> which tier, and how good was it"*. Both stay vendor-neutral on the Gemini stack.
 >
-> Tracing is **optional and additive**: with no `LANGCHAIN_*` vars set, the pipeline runs
-> identically, just untraced.
+> Tracing is **optional and additive**: with no `LANGCHAIN_*` / `LANGFUSE_*` vars set, the pipeline
+> runs identically, just untraced.
+
+## Cost tracking (Langfuse)
+
+Every LLM call routes through one client (`UnifiedLLMClient`), so a **single callback** at the
+router logs each call to Langfuse - no per-node tracing code. For each call it records the tier,
+the model that actually served it, token usage, latency and any **fallback event** (which tier
+failed and which served instead). Cost is reported **by type** - input, output and the
+cached-input portion as its own line - so the dashboard shows where spend goes, not just a lump
+sum. The numbers come from the router's own Gemini rate card, so they stay accurate for the exact
+models and the context-cache discount this project uses.
+
+One audit is **one trace**, named by where it ran and on what branch - `cli:<branch>`,
+`ci:<branch>` or `demo` - with every node's LLM call nested under it and the run's three
+dimension scores (`security_score` / `quality_score` / `test_score`) attached to that trace. So a
+single trace answers both *what did this run cost* and *how good was it*.
+
+Set these in your `.env` (copied from `.env.template`):
+```bash
+LANGFUSE_PUBLIC_KEY=your_langfuse_public_key_here
+LANGFUSE_SECRET_KEY=your_langfuse_secret_key_here
+LANGFUSE_HOST=https://cloud.langfuse.com      # or your self-hosted URL
+```
+
+Then run any audit and read spend back from the CLI:
+```bash
+python main.py --demo
+python -m scripts.cost_report           # per-tier spend + fallback events
+```
+
+> **Fail-closed on providers, fail-soft on observability.** A dead provider with no fallback
+> raises (no fabricated clean audit); a dead or unconfigured Langfuse is a no-op trace - an audit
+> never breaks because tracing is down. With no `LANGFUSE_*` keys set, the callback short-circuits
+> and the pipeline runs untraced.
+
+## Score analytics (local, over your own store)
+
+Langfuse aggregates scores as a cross-run **average**, which mixes audits of unrelated diffs into
+a near-meaningless number. The questions you actually ask - *what did the latest run score, how
+are recent runs trending, how does a branch compare* - are precise SQL over the `pr_audits` table,
+which already persists every run's three scores. `scripts/score_report.py` reads them straight
+from there, so it needs **no external service**:
+```bash
+python -m scripts.score_report            # latest score + moving average per dimension
+python -m scripts.score_report --by-branch  # average per dimension, grouped by branch
+python -m scripts.score_report --hist     # per-dimension histogram, 0.2-wide buckets
+```
 
 ## Output-Quality Evaluators (LangSmith)
 
