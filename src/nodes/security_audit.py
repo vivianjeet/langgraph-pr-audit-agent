@@ -2,8 +2,9 @@
 # LLM reasons step by step before it reports findings.
 from pydantic import BaseModel, Field
 from src.state import SecurityFinding, RuleCategory
-from src.llm_retry import call_gemini_async, QuotaExhaustedError
+from src.llm_retry import QuotaExhaustedError
 from src.memory import AgentMemorySystem as AMS, AMSState
+from src.complexity import thinking_warranted
 import src.config as cfg
 from src.llm_client import llm, cached_system
 
@@ -94,13 +95,35 @@ async def security_audit_node(state: AMSState):
     ]
 
     cache_note = ""
-    if compliance:
+    if compliance and thinking_warranted(parsed_diff, compliance):
+        # The complex slice: a multi-framework or large regulated change. Spend a reasoning budget on Pro
+        # (extended thinking) instead of caching - thinking and cache are mutually exclusive in the router,
+        # and a genuinely hard cross-regulation audit is worth the thinking tokens more than a cache hit.
+        # Still Pro, still Instructor (res.output is a parsed SecurityAuditOutput), still fail-closed.
+        try:
+            res = await llm.acall(tier="powerful", thinking=cfg.THINKING_BUDGET,
+                                  messages=messages, response_model=SecurityAuditOutput,
+                                  max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+            response = res.output
+            cache_note = (f"Thinking: budget={cfg.THINKING_BUDGET} input={res.input_tokens} "
+                          f"output={res.output_tokens} cost=${res.cost_usd:.6f}\n")
+        except QuotaExhaustedError:
+            raise
+        except Exception:
+            # Thinking unavailable (e.g. model/budget hiccup) must NOT drop the regulated audit off Pro.
+            # Re-run uncached on the powerful tier - same recovery the cache path uses. Router path =
+            # Instructor, so res.output is already a parsed SecurityAuditOutput.
+            res = await llm.acall(tier="powerful", messages=messages,
+                                  response_model=SecurityAuditOutput,
+                                  max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+            response = res.output
+    elif compliance:
         # Security caches the PREFIX (instructions+rules+compliance), NOT the diff - the opposite axis
         # from the other Flash nodes (which cache the diff via audit_with_diff_cache). The prefix is
         # byte-identical across DIFFERENT PRs of the same corpus, so this is the CROSS-PR optimization:
         # it pays when several PRs are audited within one cache window, reusing the cached prefix across
         # them. Security is on Pro (tier="powerful"), so it CANNOT share the Flash
-        # diff-handle anyway - a CachedContent is model-bound. NOTE: today the prefix is usually under
+        # diff-handle anyway - a CachedContent is model-bound. NOTE: the prefix is usually under
         # Gemini's ~2048-token cache floor, so this falls back to plain Flash (below) until the
         # rules/compliance corpus grows past it; it's a deliberate forward-looking path, not dead code.
         try:
@@ -134,10 +157,14 @@ async def security_audit_node(state: AMSState):
                                   max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
             response = res.output
     else:
+        # Unregulated diff: a plain Flash audit through the router (tier='balanced') so it's tier-resolved
+        # + traced like every other node, not a side-door call. Instructor path -> res.output is an
+        # already-parsed SecurityAuditOutput. fail-closed: QuotaExhaustedError propagates.
         try:
-            response = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,messages=messages,
-                               response_model=SecurityAuditOutput,
-                               max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+            res = await llm.acall(tier="balanced", messages=messages,
+                                  response_model=SecurityAuditOutput,
+                                  max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
+            response = res.output
         except QuotaExhaustedError:
             raise
         except Exception as e:
