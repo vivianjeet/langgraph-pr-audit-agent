@@ -186,9 +186,14 @@ def _run_with_rotation(fn):
 # --- chat (instructor) call shape ---
 @llm_retry
 def _raw_chat(model, messages, response_model, max_output_tokens):
+    # NOTE the key is "max_tokens", NOT "max_output_tokens". Instructor's GENAI_TOOLS mode translates
+    # generation_config from OpenAI-style keys (its OPENAI_TO_GEMINI_MAP maps max_tokens->max_output_tokens);
+    # a literal "max_output_tokens" here is NOT in that map, so it's silently dropped and the cap never
+    # applies (verified live: the model ran to STOP, ignoring the limit). Passing a raw genai
+    # config=GenerateContentConfig(...) does NOT work either - this mode rebuilds config from scratch.
     return _client.chat.completions.create(
         model=model, messages=messages, response_model=response_model,
-        max_retries=cfg.INSTRUCTOR_MAX_RETRIES, generation_config={"max_output_tokens": max_output_tokens},
+        max_retries=cfg.INSTRUCTOR_MAX_RETRIES, generation_config={"max_tokens": max_output_tokens},
     )
 
 
@@ -196,6 +201,38 @@ def call_gemini(model, messages, response_model, max_output_tokens):
     """Shared structured chat call: per-minute retry + per-day key-rotation + fail-closed."""
     return _run_with_rotation(
         lambda: _raw_chat(model, messages, response_model, max_output_tokens)
+    )
+
+# --- thinking-budget (instructor + ThinkingConfig) call shape ---
+@llm_retry
+def _raw_thinking(model, messages, response_model, max_output_tokens, thinking_budget):
+    """Structured chat WITH a Gemini 2.5 reasoning budget. Same instructor client as _raw_chat (so it
+    keeps typed response_model + auto-reprompt-on-bad-JSON). The budget and the output cap go through
+    DIFFERENT doors, because instructor's GENAI_TOOLS mode rebuilds the genai config itself:
+      - thinking_budget -> config=GenerateContentConfig(thinking_config=...). This mode SPECIALLY extracts
+        thinking_config from a user config= and re-applies it (verified live: thinking tokens get spent).
+      - max_output_tokens -> generation_config={"max_tokens": N}. The cap must use the OpenAI-style key
+        "max_tokens" (NOT "max_output_tokens"), which instructor's OPENAI_TO_GEMINI_MAP translates; a raw
+        max_output_tokens inside config= is dropped when the mode rebuilds config (verified live: ignored)."""
+    from google.genai import types
+    # create_with_completion returns (parsed_model, raw_response) so the caller can read the raw
+    # usage_metadata (thinking tokens dominate the cost on 2.5 - the plain create() drops them).
+    return _client.chat.completions.create_with_completion(
+        model=model, messages=messages, response_model=response_model,
+        max_retries=cfg.INSTRUCTOR_MAX_RETRIES,
+        generation_config={"max_tokens": max_output_tokens},
+        config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_budget=thinking_budget)),
+    )
+
+
+def call_thinking(model, messages, response_model, max_output_tokens, thinking_budget):
+    """Shared thinking-budget call: per-minute retry + per-day key-rotation + fail-closed, like
+    call_gemini, plus a reasoning budget. Structured (instructor) so it returns a parsed model, NOT
+    raw text - the thinking slice gets a validated verdict, not a string to hand-parse. Returns
+    (parsed_model, raw_response) so the router can price the (thinking-dominated) token usage."""
+    return _run_with_rotation(
+        lambda: _raw_thinking(model, messages, response_model, max_output_tokens, thinking_budget)
     )
 
 # --- embedding (raw genai) call shape ---
