@@ -14,7 +14,7 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 - **Python 3.12+ / asyncio:** The three audits are `async` nodes that run **concurrently** - their Gemini calls overlap on worker threads (`asyncio.to_thread`) instead of running in series.
 
 **LLM & structured output**
-- **Gemini 2.5 Flash + Gemini 2.5 Pro (via `google-genai`):** Flash drives the triage/quality/coverage/compliance work; Pro the deeper reasoning (reflexion and the security audit's cache path). Nodes pick by *tier*, not by name - see below.
+- **Gemini 2.5 Flash + Gemini 2.5 Pro (via `google-genai`):** Flash drives the triage/quality/coverage/compliance work; Pro the deeper reasoning (reflexion and the security audit on a regulated diff - with an extended-thinking budget on the genuinely complex slice). Nodes pick by *tier*, not by name - see below.
 - **Model-tier router + context caching:** One router (`UnifiedLLMClient`) maps a tier to a model and keeps the retry/rotation/fail-closed contract; the shared diff is cached once per audit and reused across the Flash nodes (~74% input-cost cut on a large diff, verified live). See [Model tiers & context caching](#model-tiers--context-caching).
 - **Instructor:** Enforces strict structured outputs (Pydantic V2 schemas) - no hand-rolled JSON parsing.
 
@@ -137,7 +137,7 @@ Every node selects its model by **tier**, not by a hard-coded name, through one 
 |------|-------|----------|
 | `fast` | Gemini 2.5 Flash-Lite | the cheapest path / fallback floor |
 | `balanced` | Gemini 2.5 Flash | triage, plan, the quality/coverage audits, compliance |
-| `powerful` | Gemini 2.5 Pro | reflexion and the security audit's cache path |
+| `powerful` | Gemini 2.5 Pro | reflexion and the security audit on a regulated diff (its cache or extended-thinking path) |
 | `cite` | Gemini 2.5 Flash | the verbatim-citation extraction |
 
 A tier that isn't pinned falls back down the chain (`balanced → fast`) on an exhausted model. The
@@ -182,6 +182,31 @@ compliance context, so the security audit skips this path and runs on plain Flas
 nodes. Today the prefix is usually under the 2,048-token floor too, so even the regulated path falls
 back to a plain Flash call until the rule/compliance corpus grows past it - a deliberate, documented
 forward-looking path rather than a live saving.
+
+### Extended thinking (only on the complex slice)
+
+Gemini 2.5 can spend a budget of internal **reasoning** tokens before it answers
+(`ThinkingConfig`). That budget is worth paying for a genuinely hard audit and wasted on a routine
+one, so it is gated rather than always-on. A deterministic, no-LLM heuristic
+(`thinking_warranted` in `src/complexity.py`) decides: a change earns the thinking budget when it
+spans **more than one** regulated framework (cross-regulation interplay), or when it is **large and
+touches at least one** framework. A single-framework or unregulated diff never pays the cost - that
+is the cheap majority path.
+
+Only the **security audit** consumes this, because it is the one node that has both signals to hand
+(the parsed diff and the compliance passages). On a complex regulated diff it runs on Pro with the
+thinking budget; on a simpler regulated diff it takes the prefix-cache path instead; an unregulated
+diff stays on plain Flash. The thinking call still goes through the one router and the shared
+retry / key-rotation / fail-closed spine - thinking is a deliberate, tier-specific call, so fallback
+to a cheaper model is disabled for it, and a quota exhaustion still aborts the run rather than
+degrading to a clean score. It keeps the same Instructor structured output as every other call (a
+validated finding list, not raw text), and the reasoning tokens are folded into the call's output
+cost so the trace prices the thinking honestly.
+
+This composes with the rest of the routing rather than replacing it: thinking and the context cache
+are mutually exclusive on the same call (a thinking call sends a fresh prompt; the cache reuses a
+stored one), so the complex slice spends its budget on reasoning and the simpler slice spends it on a
+cache hit.
 
 ### Tool-choice modes (forcing a call vs letting the model decide)
 
