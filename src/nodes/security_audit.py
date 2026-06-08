@@ -97,9 +97,9 @@ async def security_audit_node(state: AMSState):
     if compliance:
         # Security caches the PREFIX (instructions+rules+compliance), NOT the diff - the opposite axis
         # from the other Flash nodes (which cache the diff via audit_with_diff_cache). The prefix is
-        # byte-identical across DIFFERENT PRs of the same corpus, so this is the CROSS-PR / batch
-        # optimization: it pays when many PRs are audited in one window (Batch Mode, later), reusing the
-        # cached prefix across them. Security is on Pro (tier="powerful"), so it CANNOT share the Flash
+        # byte-identical across DIFFERENT PRs of the same corpus, so this is the CROSS-PR optimization:
+        # it pays when several PRs are audited within one cache window, reusing the cached prefix across
+        # them. Security is on Pro (tier="powerful"), so it CANNOT share the Flash
         # diff-handle anyway - a CachedContent is model-bound. NOTE: today the prefix is usually under
         # Gemini's ~2048-token cache floor, so this falls back to plain Flash (below) until the
         # rules/compliance corpus grows past it; it's a deliberate forward-looking path, not dead code.

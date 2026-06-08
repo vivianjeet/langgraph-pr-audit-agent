@@ -45,16 +45,30 @@ def _run(mode, spec):
     resp = client.models.generate_content(
         model="gemini-2.5-flash", contents=DIFF, config=_cfg(tools, fc_mode, allowed))
     um = resp.usage_metadata
-    calls = [p for c in (resp.candidates or []) for p in (c.content.parts or [])
-             if getattr(p, "function_call", None)]
-    return mode, um.prompt_token_count, um.candidates_token_count, len(calls)
+    # parts/content can be absent on an empty candidate; thoughts_token_count is the hidden
+    # reasoning cost Gemini 2.5 spends deciding "should I / which tool?" - the whole point of
+    # the comparison, and the dominant term, so it must be counted, not just in/out.
+    calls = sum(
+        1
+        for c in (resp.candidates or [])
+        for p in (getattr(getattr(c, "content", None), "parts", None) or [])
+        if getattr(p, "function_call", None)
+    )
+    return (
+        mode,
+        um.prompt_token_count or 0,
+        um.candidates_token_count or 0,
+        getattr(um, "thoughts_token_count", 0) or 0,
+        um.total_token_count or 0,
+        calls,
+    )
 
 
 def main():
-    print(f"{'mode':10s}{'inTok':>7s}{'outTok':>7s}{'#calls':>7s}")
+    print(f"{'mode':10s}{'inTok':>7s}{'outTok':>7s}{'think':>7s}{'total':>7s}{'#calls':>7s}")
     for mode, spec in MODES.items():
-        m, i, o, n = _run(mode, spec)
-        print(f"{m:10s}{i:7d}{o:7d}{n:7d}")
+        m, i, o, t, tot, n = _run(mode, spec)
+        print(f"{m:10s}{i:7d}{o:7d}{t:7d}{tot:7d}{n:7d}")
 
 if __name__ == "__main__":
     main()

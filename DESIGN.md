@@ -63,8 +63,8 @@ quality/coverage calls reach it - they become pure reusers and the concurrent cr
 happens. We did not need a lock; ordering solved it. Both caches honour Gemini's 2048-token floor:
 under it the call is rejected and the node falls back to a plain (uncached) call, so a small diff or a
 small prefix costs nothing extra. The diff clears the floor on large PRs (where the saving matters);
-the prefix usually does not yet, so security's cache is a documented forward-looking path for batch
-runs rather than a live saving today.
+the prefix usually does not yet, so security's cache is a documented forward-looking path for a busy
+review queue rather than a live saving today.
 
 **Why does the tier router re-raise `QuotaExhaustedError` instead of a generic error?** The router
 walks a fallback chain and, when every tier fails, raises. But the nodes' fail-closed contract keys off
@@ -90,8 +90,12 @@ Instructor" as a label.
 
 **Why keep Instructor instead of switching to raw tool-choice (`tool_config`) everywhere?** Gemini's
 `FunctionCallingConfig` can force a call (`mode=ANY` pinned to one function) - the benchmark in
-`scripts/tool_choice_bench.py` shows that forcing is the cheapest mode because it drops the "should I
-call?" reasoning. But the audit's forced calls are all *structured extraction* into a pydantic model,
+`scripts/tool_choice_bench.py` measures all four modes live. The naive expectation is that forcing is
+cheapest because it drops the "should I call?" reasoning; on Gemini 2.5 Flash that does not hold,
+because a forced call still spends a few hundred *thinking* tokens working out the arguments, so the
+benchmark counts `thoughts_token_count` (the dominant term) and the only stable cost delta is
+structural: `parallel` costs a fixed extra input for the second tool's schema. But the audit's forced
+calls are all *structured extraction* into a pydantic model,
 and Instructor already forces that on the Gemini spine AND retries on a schema-validation failure -
 strictly more than raw `tool_config`, which forces the call but does nothing about a malformed result.
 So Instructor stays the path for the schemas; the tool-choice benchmark earns its place as the measured
