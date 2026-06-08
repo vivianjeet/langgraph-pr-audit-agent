@@ -63,8 +63,8 @@ quality/coverage calls reach it - they become pure reusers and the concurrent cr
 happens. We did not need a lock; ordering solved it. Both caches honour Gemini's 2048-token floor:
 under it the call is rejected and the node falls back to a plain (uncached) call, so a small diff or a
 small prefix costs nothing extra. The diff clears the floor on large PRs (where the saving matters);
-the prefix usually does not yet, so security's cache is a documented forward-looking path for batch
-runs rather than a live saving today.
+the prefix usually does not yet, so security's cache is a documented forward-looking path for a busy
+review queue rather than a live saving today.
 
 **Why does the tier router re-raise `QuotaExhaustedError` instead of a generic error?** The router
 walks a fallback chain and, when every tier fails, raises. But the nodes' fail-closed contract keys off
@@ -90,8 +90,12 @@ Instructor" as a label.
 
 **Why keep Instructor instead of switching to raw tool-choice (`tool_config`) everywhere?** Gemini's
 `FunctionCallingConfig` can force a call (`mode=ANY` pinned to one function) - the benchmark in
-`scripts/tool_choice_bench.py` shows that forcing is the cheapest mode because it drops the "should I
-call?" reasoning. But the audit's forced calls are all *structured extraction* into a pydantic model,
+`scripts/tool_choice_bench.py` measures all four modes live. The naive expectation is that forcing is
+cheapest because it drops the "should I call?" reasoning; on Gemini 2.5 Flash that does not hold,
+because a forced call still spends a few hundred *thinking* tokens working out the arguments, so the
+benchmark counts `thoughts_token_count` (the dominant term) and the only stable cost delta is
+structural: `parallel` costs a fixed extra input for the second tool's schema. But the audit's forced
+calls are all *structured extraction* into a pydantic model,
 and Instructor already forces that on the Gemini spine AND retries on a schema-validation failure -
 strictly more than raw `tool_config`, which forces the call but does nothing about a malformed result.
 So Instructor stays the path for the schemas; the tool-choice benchmark earns its place as the measured
@@ -107,6 +111,37 @@ value defined once: the tier table reads its models from `cfg`, the retry spine 
 `cfg`, the graph reads its thresholds from `cfg`. The constraint that keeps this clean is direction:
 `config` imports only stdlib (and `Severity` from `state.py`), and `state.py` never imports `config` -
 a one-way edge with no cycle, so config stays a leaf the whole tree can depend on.
+
+**Why two observability backends (LangSmith *and* Langfuse) when one is the usual answer?** They
+trace different layers, so neither is redundant. LangSmith auto-instruments the **graph** - it
+reads the LangGraph run node-by-node with zero application code, which is exactly what you want for
+*"which node produced this score and why"* and for the offline output-quality evaluators. Langfuse
+traces the **router's economics** - per-tier cost, fallback events and the run's scores - at the
+one place every model call funnels through. The project's whole point is a model-tier router with
+fallback and key rotation, so the interesting, demonstrable signal is *which tier ran, did it fall
+back, what did it cost*. That is a router-level, vendor-neutral, per-call concern, not a graph-shape
+one - and it would be awkward to read out of LangSmith's node tracing. Both stay optional and
+fail-soft; with no keys, the pipeline runs untraced.
+
+**Why one callback, and why re-attach the OTEL context by hand?** Cost tracing lives at the
+router's single trace site, so adding a node never means adding tracing code - one callback covers
+every call. The subtlety is nesting: the audit opens one parent span, but the graph runs each node
+in its own asyncio task and the cache path hops onto a worker thread via `to_thread`, and
+OpenTelemetry's "current span" is contextvar-based - it does **not** cross those boundaries on its
+own. Pinning children by trace-id alone half-worked but made the trace take a child's name and
+spawned an empty duplicate. The clean fix is to capture the parent's OTEL context inside the span
+and re-attach it (`context.attach` / `detach`) around each call's observation, so every generation
+is a true child of the parent regardless of which task or thread it ran on - one trace per run,
+named by surface and branch, with the scores attached to it.
+
+**Why read scores from Postgres rather than Langfuse?** Langfuse aggregates a score as a cross-run
+*average*, but averaging the scores of unrelated diffs is close to meaningless - a clean docs change
+and a SQL-injection auth change do not belong in the same mean. The questions worth asking - the
+latest run's score, a trend over recent runs, a per-branch comparison, a distribution - are precise
+queries over the `pr_audits` table, which already persists every run's three scores. So those live
+in `scripts/score_report.py` over the authoritative store (latest, moving average, by-branch,
+histogram), needing no external service, while Langfuse keeps the per-run scores on the trace for
+the cost-and-quality-in-one-view story.
 
 ## Handling very large (1M+ token) PR diffs
 

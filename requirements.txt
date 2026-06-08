@@ -28,6 +28,7 @@ PyYAML==6.0.3
 
 # Observability (tracing + output-quality evaluators)
 langsmith==0.8.6
+langfuse==4.7.1
 
 # Dev / test
 pytest==9.0.3

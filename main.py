@@ -3,12 +3,14 @@ import argparse
 import sys
 import uuid
 from src.llm_retry import QuotaExhaustedError
+from src.llm_client import flush_traces, audit_trace
 from src.state import Severity
 import asyncio
 
 VALID_DECISIONS = ("approve", "reject", "needs-changes")
 
-async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=None) -> bool:
+async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=None,
+                    surface: str = "audit") -> bool:
     """Runs the end to end graph execution on the provided diff.
 
     Local (ci=False): if it pauses for human review, PROMPT for a decision and resume.
@@ -33,6 +35,24 @@ async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=N
     config = {"configurable": {"thread_id": thread_id}}
     
     print("Running graph...\n")
+
+    # Open ONE parent trace for the whole run so every node's LLM call nests under it and the
+    # synthesize node's scores attach to it. Driven manually (not `with`) to wrap the existing
+    # try/finally without re-indenting the body; closed in the finally below. No-op if unconfigured.
+    # Trace name composes from two axes so runs are decipherable AND batch-ready (Day 33):
+    #   demo                      -> just "demo" (no branch/ci - it's the canned fixture)
+    #   a real audit              -> "{ci|cli}:{branch}", e.g. "cli:develop" / "ci:develop"
+    #   batch (later)             -> surface="batch" -> "batch-ci:develop" / "batch-cli:develop"
+    # No 'pr-audit' prefix - the whole project IS the PR auditor.
+    from scripts.git_gate import current_branch
+    if surface == "demo":
+        label = "demo"
+    else:
+        where = "ci" if ci else "cli"
+        prefix = f"batch-{where}" if surface == "batch" else where
+        label = f"{prefix}:{current_branch() or 'detached'}"
+    _trace_cm = audit_trace(thread_id, label=label)
+    _trace_cm.__enter__()
 
     async def _drain(stream):
        async  for event in stream:
@@ -113,6 +133,18 @@ async def run_audit(diff_text: str, large: bool = False, ci: bool = False, app=N
         print("  All keys exhausted. Re-run after the daily reset (midnight PT) or enable API billing.")
         return False   # NO report emitted, by design
 
+    finally:
+        # Close the parent trace, then flush. Order matters: end the span before shutting the
+        # client down so the scored, fully-nested trace is what gets exported.
+        try:
+            _trace_cm.__exit__(None, None, None)
+        except Exception:
+            pass
+        # Flush Langfuse spans while the event loop is still alive. atexit is too late
+        # under asyncio.run + sys.exit (the loop/exporter threads are already tearing
+        # down), so every audit path flushes deterministically here.
+        flush_traces()
+
 
 async def run_gate(large: bool, durable: bool = False):
     """The --large pre-merge gate. Audits the REAL diff (changes vs the branch being merged into)
@@ -150,14 +182,15 @@ async def run_gate(large: bool, durable: bool = False):
         sys.exit(0)
 
 
-async def _run_with_app(diff_text: str, large: bool, durable: bool) -> bool:
+async def _run_with_app(diff_text: str, large: bool, durable: bool, surface: str = "demo") -> bool:
     """Pick the checkpointer backend, then run one audit. --durable -> a SQLite-backed app whose
-    threads survive a process restart; otherwise the default in-RAM app."""
+    threads survive a process restart; otherwise the default in-RAM app. `surface` labels the
+    trace (the --demo path is its only caller, so it defaults to 'demo')."""
     if durable:
         from src.graph import durable_app
         async with durable_app() as app:
-            return await run_audit(diff_text, large=large, app=app)
-    return await run_audit(diff_text, large=large)
+            return await run_audit(diff_text, large=large, app=app, surface=surface)
+    return await run_audit(diff_text, large=large, surface=surface)
 
 
 def main():

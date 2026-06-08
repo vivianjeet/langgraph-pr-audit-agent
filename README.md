@@ -31,7 +31,8 @@ It uses **LangGraph** to orchestrate a team of specialized agents over a GitHub 
 - **Resilience layer (`src/llm_retry.py`, `tenacity`):** Centralized retry / server-directed backoff / multi-key rotation across every Gemini call, **thread-safe** under the concurrent fan-out, with fail-closed semantics. Classifies a 429 by its cause - per-minute throttle (wait the server's stated delay), per-day quota or depleted billing credits (rotate keys), blocked key (rotate immediately) - never one blunt retry policy.
 
 **Observability & ops**
-- **LangSmith:** Tracing + custom output-quality evaluators.
+- **LangSmith:** Graph tracing (node-by-node) + custom output-quality evaluators.
+- **Langfuse:** Per-tier cost (by type), latency and fallback events logged at the router's single callback, plus each run's three scores on one trace - read back with `scripts/cost_report.py` / `scripts/score_report.py`.
 - **GitHub Actions:** A free test job on every PR plus an opt-in [pre-merge audit gate](#continuous-integration-audit-on-every-pr) that blocks merge on an unaddressed critical finding.
 
 ---
@@ -100,7 +101,14 @@ A clean diff renders no section - the absence of a citation is never dressed up 
 docker compose up -d
 python -m src.db.vectorstore        # creates the compliance_docs table + HNSW index
 python -m scripts.seed_compliance   # loads every packs/*.yaml (idempotent)
+python -m scripts.check_corpus      # pre-flight: corpus seeded? every framework present?
 ```
+
+`check_corpus` is the one-glance sanity check after seeding. It catches the two failures that
+otherwise show up only as a silently empty audit: a corpus that was never seeded (the table is empty,
+so every `compliance_hits` is zero), and a pack that failed to load (one framework missing or the
+per-framework counts uneven). It reads `DATABASE_URL` and prints the per-framework row counts, so an
+even spread is the all-clear and a gap names the pack to re-seed.
 
 ### Reliability (fail-closed)
 Every Gemini call routes through `src/llm_retry.py`, which:
@@ -162,13 +170,13 @@ independent because a cache read is billed at 25% of the input rate either way. 
 `cached_content_token_count > 0` on the repeat call - the claim is never made without that field
 proving the cache actually engaged.
 
-### Caching the prefix (cross-PR, for batch)
+### Caching the prefix (cross-PR)
 
 The security audit takes this path **only on a regulated diff** - when the compliance node found
 matching passages, it runs on Pro (`tier="powerful"`) and caches its stable system **prefix**
 (instructions + rules + compliance), which is byte-identical across *different* PRs of the same corpus.
 That's the cross-PR optimization - it pays when many PRs are audited inside the 5-minute cache window
-(batch runs, a busy review queue), not on a single audit. On its Pro path security can't share the
+(a busy review queue), not on a single audit. On its Pro path security can't share the
 Flash diff-handle regardless, since a `CachedContent` is model-bound. An *unregulated* diff has no
 compliance context, so the security audit skips this path and runs on plain Flash like the other audit
 nodes. Today the prefix is usually under the 2,048-token floor too, so even the regulated path falls
@@ -178,7 +186,7 @@ forward-looking path rather than a live saving.
 ### Tool-choice modes (forcing a call vs letting the model decide)
 
 When a node offers the model a tool, Gemini's `FunctionCallingConfig.mode` controls *whether* the model
-is allowed to skip the call. The choice is not cosmetic - it changes the output-token cost:
+is allowed to skip the call. The choice is not cosmetic - it changes how many tokens the call costs:
 
 | Mode | `mode` / `allowed_function_names` | Behaviour |
 |------|----------------------------------|-----------|
@@ -188,12 +196,18 @@ is allowed to skip the call. The choice is not cosmetic - it changes the output-
 | **parallel** | `AUTO`, two tools offered | the model may emit **both** calls in one turn (one round-trip instead of two) |
 
 `scripts/tool_choice_bench.py` measures all four on a fixed diff so the token deltas are real numbers,
-not a claim. Forcing a specific tool (`tool`) is the cheapest: it skips both the "should I?" and the
-"which one?" reasoning. `parallel` is the latency win - a diff that needs two lookups does one
-round-trip rather than two.
+not a claim. Two findings hold across every run. First, the **input cost is structural and stable**:
+`auto`, `any` and `tool` all send the same prompt (one tool's schema), while `parallel` costs a fixed
+**+42 input tokens** for the second tool's declaration - that is what buying the both-in-one-turn option
+costs, and it doesn't drift run to run. Second, on Gemini 2.5 Flash the **thinking tokens dominate** the
+visible output: a forced call still spends a few hundred reasoning tokens deciding the *arguments* even
+when it can't decide *whether* to call, so "force the call to save tokens" does not hold here the way it
+would on a non-reasoning model. The bench counts `thoughts_token_count` for exactly this reason - the
+older in/out-only view hid the largest term. `parallel` remains the unambiguous win on **latency**: a
+diff that needs two lookups does one round-trip rather than two.
 
 ```bash
-python -m scripts.tool_choice_bench   # live; prints inTok / outTok / #calls per mode
+python -m scripts.tool_choice_bench   # live; prints inTok / outTok / think / total / #calls per mode
 ```
 
 The audit applies this lesson without a rewrite. The forced-extraction case is exactly the
@@ -575,6 +589,36 @@ caching that are now in place. It times the run; per-call token counts are in th
 python -m scripts.bench_audit     # live LLM calls (one full audit per run) - keep the run count modest
 ```
 
+### Where the latency goes (`bench_breakdown.py`)
+`bench_audit` gives the wall-clock total; `bench_breakdown.py` splits it. It times each MCP server's
+cold start in isolation, then streams one audit and records the delta at every node, so you can see
+whether time is going into server spin-up or a specific node rather than the LLM calls. It is the tool
+you reach for when the total moves and you need to know *which part* moved.
+```bash
+python -m scripts.bench_breakdown # live; prints per-server startup, per-node delta, and total
+```
+
+### Embedding: batch vs loop (`bench_embed.py`)
+`bench_embed.py` times embedding N texts one call at a time against a single `embed_batch` call. The
+win is round-trip amortization, so the ratio is structural rather than a one-run fluke: batching **~30
+texts is about 7.7x faster** (measured live, free tier) because it collapses N network round-trips into
+one. This is why the seed and recall paths embed in batches, not in a loop.
+```bash
+python -m scripts.bench_embed     # live; prints per-text ms for loop vs batch and the speed-up
+```
+
+### Full fixture pass (`integration_pass.py`)
+`integration_pass.py` runs all five PR fixtures end-to-end through the real graph and prints one table:
+per-PR latency, security-finding count, compliance hits, citations emitted, whether the run escalated
+to `human_review`, and the security score. It is the broad behavioural check - confirming that a
+regulated diff cites clauses and a high-risk diff escalates, across the whole fixture set, in one run.
+Add `--findings` to also list every finding's dimension, severity and title (handy for seeing which
+finding drove an escalation).
+```bash
+python -m scripts.integration_pass            # live; the per-PR results table
+python -m scripts.integration_pass --findings # also list each finding's dimension/severity/title
+```
+
 ### Representative audit results
 `scripts/integration_pass.py` runs five representative diffs end to end against live Gemini and the
 compliance corpus. A recent pass:
@@ -839,13 +883,63 @@ trace; drill into any node to see its prompt and structured output. This is what
 multi-step agent debuggable - when a score looks wrong you can see *which* node produced it and
 *why*, instead of guessing from the final report.
 
-> **Why LangSmith here, and not a second backend?** LangSmith covers both tracing *and* the
-> output-quality evaluators below, so it earns its place. A self-hostable backend (Langfuse) is
-> deferred to a dedicated self-hosted Docker stack, where the "zero data egress / regulated
-> deployment" story is built properly - rather than bolting a redundant second tracer onto this repo.
+> **LangSmith and Langfuse trace different layers - they are complementary, not redundant.**
+> LangSmith auto-instruments the **graph**: it traces the LangGraph run node-by-node (prompt,
+> model, structured output per node) and powers the output-quality evaluators below - that is its
+> job, and it needs zero application code. Langfuse traces the **router's economics**: at the
+> router's single callback it logs per-tier cost, token usage, latency and fallback events, and
+> attaches each run's three dimension scores to one trace (see [Cost tracking](#cost-tracking-langfuse)).
+> One answers *"which node produced this and why"*; the other answers *"what did this run cost, on
+> which tier, and how good was it"*. Both stay vendor-neutral on the Gemini stack.
 >
-> Tracing is **optional and additive**: with no `LANGCHAIN_*` vars set, the pipeline runs
-> identically, just untraced.
+> Tracing is **optional and additive**: with no `LANGCHAIN_*` / `LANGFUSE_*` vars set, the pipeline
+> runs identically, just untraced.
+
+## Cost tracking (Langfuse)
+
+Every LLM call routes through one client (`UnifiedLLMClient`), so a **single callback** at the
+router logs each call to Langfuse - no per-node tracing code. For each call it records the tier,
+the model that actually served it, token usage, latency and any **fallback event** (which tier
+failed and which served instead). Cost is reported **by type** - input, output and the
+cached-input portion as its own line - so the dashboard shows where spend goes, not just a lump
+sum. The numbers come from the router's own Gemini rate card, so they stay accurate for the exact
+models and the context-cache discount this project uses.
+
+One audit is **one trace**, named by where it ran and on what branch - `cli:<branch>`,
+`ci:<branch>` or `demo` - with every node's LLM call nested under it and the run's three
+dimension scores (`security_score` / `quality_score` / `test_score`) attached to that trace. So a
+single trace answers both *what did this run cost* and *how good was it*.
+
+Set these in your `.env` (copied from `.env.template`):
+```bash
+LANGFUSE_PUBLIC_KEY=your_langfuse_public_key_here
+LANGFUSE_SECRET_KEY=your_langfuse_secret_key_here
+LANGFUSE_HOST=https://cloud.langfuse.com      # or your self-hosted URL
+```
+
+Then run any audit and read spend back from the CLI:
+```bash
+python main.py --demo
+python -m scripts.cost_report           # per-tier spend + fallback events
+```
+
+> **Fail-closed on providers, fail-soft on observability.** A dead provider with no fallback
+> raises (no fabricated clean audit); a dead or unconfigured Langfuse is a no-op trace - an audit
+> never breaks because tracing is down. With no `LANGFUSE_*` keys set, the callback short-circuits
+> and the pipeline runs untraced.
+
+## Score analytics (local, over your own store)
+
+Langfuse aggregates scores as a cross-run **average**, which mixes audits of unrelated diffs into
+a near-meaningless number. The questions you actually ask - *what did the latest run score, how
+are recent runs trending, how does a branch compare* - are precise SQL over the `pr_audits` table,
+which already persists every run's three scores. `scripts/score_report.py` reads them straight
+from there, so it needs **no external service**:
+```bash
+python -m scripts.score_report            # latest score + moving average per dimension
+python -m scripts.score_report --by-branch  # average per dimension, grouped by branch
+python -m scripts.score_report --hist     # per-dimension histogram, 0.2-wide buckets
+```
 
 ## Output-Quality Evaluators (LangSmith)
 
@@ -865,6 +959,59 @@ python -m src.evaluators
 
 > This is the seed of a discipline that matures later into a CI **eval gate** (auto-run on
 > any prompt/retrieval change, fail the build below a quality threshold).
+
+---
+
+## Command reference
+
+Every runnable command in one place. The sections above explain *why* each exists; this is the index.
+
+**Run the agent** (`main.py`)
+```bash
+python main.py            # one audit, in-RAM threads (default)
+python main.py --test     # end-to-end smoke test over the sample diff
+python main.py --demo     # interactive human-in-the-loop audit on the SQL-injection diff
+python main.py --large    # force the context-compression pass (also the pre-merge gate path)
+python main.py --durable  # persist threads to checkpoints.sqlite so a paused run survives a restart
+```
+
+**Database & corpus** (`src/db`, `scripts/seed_*`)
+```bash
+docker compose up -d                # start pgvector (Postgres 16) on $POSTGRES_PORT
+python -m src.db.vectorstore        # create the tables + HNSW index (idempotent)
+python -m src.db.vectorstore drop   # DESTRUCTIVE - drop all tables; prompts for 'yes' first
+python -m scripts.seed_rules        # load baseline org rules (idempotent)
+python -m scripts.seed_compliance   # load every packs/*.yaml compliance pack (idempotent)
+python -m scripts.check_corpus      # pre-flight: corpus seeded? every framework present?
+```
+
+**Tests**
+```bash
+pytest -v                           # everything, including live integration tests
+pytest -m "not integration" -v      # fast, $0, mocked-LLM unit tests only
+```
+
+**Benchmarks & reports** (`scripts/*`) - all make live calls unless noted
+```bash
+python -m scripts.bench_audit       # min/median/max audit latency
+python -m scripts.bench_breakdown   # per-MCP-server startup, per-node delta, total
+python -m scripts.bench_embed       # loop embed() vs embed_batch() speed-up
+python -m scripts.tool_choice_bench # inTok/outTok/think/total/#calls per tool-choice mode
+python -m scripts.integration_pass  # all 5 PR fixtures end-to-end -> results table (--findings for detail)
+python -m scripts.cost_report       # per-tier spend + fallback events (reads persisted runs)
+python -m scripts.score_report      # latest score + moving average (--by-branch, --hist)
+```
+
+**MCP & rule governance** (`scripts/*`)
+```bash
+python -m scripts.mcp_test_client   # talk to the compliance server over stdio (MCP_DEBUG=1 for logs)
+python -m scripts.review_rules      # review/approve/reject agent-proposed procedural rules
+```
+
+**Offline evaluators** (`src/evaluators.py`)
+```bash
+python -m src.evaluators            # score trustworthiness against the LangSmith eval dataset
+```
 
 ---
 

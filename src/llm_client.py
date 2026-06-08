@@ -5,8 +5,21 @@ from src.llm_retry import (
     call_cached_generate, call_gemini, call_gemini_async, QuotaExhaustedError,
 )
 import src.config as cfg
+import os, time
+from contextvars import ContextVar
+from opentelemetry import context as _otel_ctx
 
-_CACHE_HANDLES: dict[str, str] = {}  
+_LANGFUSE = None
+
+# The OpenTelemetry context active inside the audit's parent span. audit_trace() captures it;
+# _trace() re-attaches it so each LLM-call generation becomes a TRUE child of the parent span -
+# even when it runs in a different LangGraph node task or the cache path's to_thread worker (OTEL's
+# "current span" is contextvar-based and doesn't auto-propagate across those hops). Carrying the
+# whole context (not just the trace_id) is what keeps the parent as the real root - pinning by
+# trace_id alone made the trace take a child's name and spawned an empty duplicate.
+_AUDIT_OTEL_CTX: ContextVar[object | None] = ContextVar("audit_otel_ctx", default=None)
+
+_CACHE_HANDLES: dict[str, str] = {}
 log = logging.getLogger(__name__)
 
 _PRICES = {
@@ -40,11 +53,74 @@ TIER_TABLE = {
 
 _FALLBACK = ["balanced", "fast"]
 
+def _langfuse():
+    """Lazily build the Langfuse client IF keys are set. Tracing is best-effort: no keys -> no-op,
+    a tracing failure NEVER breaks an audit (observability is not on the fail-closed path)."""
+    global _LANGFUSE
+    if _LANGFUSE is None and os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        try:
+            from langfuse import Langfuse
+            _LANGFUSE = Langfuse()
+        except Exception as e:
+            log.warning("Langfuse init failed (%s);  tracing disabled.", e)
+            _LANGFUSE = False
+    return _LANGFUSE or None
+
+def _trace(res: LLMResult, tier: str, latency_s: float):
+    lf = _langfuse()
+    if lf is None:
+        return
+    # Re-attach the audit's OTEL context so this generation becomes a TRUE child of the parent
+    # span (implicit context doesn't cross LangGraph's per-node tasks / the to_thread hop). Outside
+    # an audit there's no captured context -> attach is skipped -> the call gets its own trace.
+    saved = _AUDIT_OTEL_CTX.get()
+    otel_token = _otel_ctx.attach(saved) if saved is not None else None
+    try:
+        with lf.start_as_current_observation(
+            name=f"audit-llm:{tier}",
+            as_type="generation",
+            model=res.model,
+            usage_details={"input": res.input_tokens, "output": res.output_tokens,
+                           "cache_read": res.cache_read_tokens},
+            cost_details=_price_breakdown(res.model, res.input_tokens, res.output_tokens,
+                                          res.cache_read_tokens),
+            metadata={"backend": res.backend,
+                      "tier": tier,
+                      "cache_read_tokens": res.cache_read_tokens,
+                      "fell_back_from": res.fell_back_from,
+                      "latency_s": round(latency_s, 3)},
+        ):
+            pass
+    except Exception as e:
+        log.warning("Langfuse trace failed (%s); continuing.", e)
+    finally:
+        if otel_token is not None:
+            _otel_ctx.detach(otel_token)
+
 def _price(model: str, in_tok: int, out_tok: int, cache_read: int = 0) -> float:
     pin, pout = _PRICES.get(model, (0.0,0.0))
     # cached input is ~25% of base input price (Gemini context cache); approximate for the dashboard.
     billable_in = (in_tok - 0.75*cache_read)
     return (billable_in * pin + out_tok * pout) / 1_000_000
+
+
+def _price_breakdown(model: str, in_tok: int, out_tok: int, cache_read: int = 0) -> dict:
+    """Same arithmetic as _price, split into components so the dashboard shows cost BY TYPE.
+    All lines are POSITIVE actual costs that sum to total (Langfuse cost_details must not be
+    negative). cache_read = the cached portion of input, billed at ~25% of base; it shows as its
+    own (small, because discounted) line so the cache's value is visible. in_tok includes the
+    cached tokens, so the plain-input line prices only the NON-cached remainder. Matches _price."""
+    pin, pout = _PRICES.get(model, (0.0, 0.0))
+    non_cached_in = max(in_tok - cache_read, 0)
+    input_cost  = non_cached_in * pin / 1_000_000          # input NOT served from cache, full price
+    cache_cost  = cache_read * 0.25 * pin / 1_000_000      # cached input at the ~25% discounted rate
+    output_cost = out_tok * pout / 1_000_000
+    return {
+        "input":      round(input_cost, 6),
+        "cache_read": round(cache_cost, 6),
+        "output":     round(output_cost, 6),
+        "total":      round(input_cost + cache_cost + output_cost, 6),
+    }
 
 async def _acall_gemini(model, messages, response_model, max_output_tokens) -> LLMResult:
     out = await call_gemini_async(model=model, messages=messages,
@@ -151,9 +227,10 @@ class UnifiedLLMClient:
     Fallback is DISABLED when cache/thinking is requested: those are deliberate, tier-specific calls
     (you asked for Pro+thinking), so silently falling back to a cheaper model would defeat the point -
     it raises instead, staying fail-closed and honest about which tier ran."""
-
+    
     async def acall(self, tier: str = "fast", *, messages: list,  response_model=None,
                     max_output_tokens: int = 2000, cache: bool = False, thinking: int = 0) -> LLMResult:
+        t0 = time.perf_counter()
         special = cache or thinking
         last_err = None
         for i, t in enumerate(_resolve_chain(tier, special)):
@@ -175,7 +252,7 @@ class UnifiedLLMClient:
                 if i > 0:
                     res.fell_back_from = tier
                     log.warning("LLM tier '%s' failed; served by fallback '%s'", tier, t)
-                _trace(res, tier, 0.0)
+                _trace(res, tier, time.perf_counter() - t0)
                 return res
             except Exception as e:
                 last_err = e
@@ -208,9 +285,6 @@ class UnifiedLLMClient:
 # Forward-reference stubs yo be filled
 async def _acall_thinking(*a, **k):
     raise NotImplementedError
-
-def _trace(*a, **k):
-    pass
 
 
 llm = UnifiedLLMClient()   # THE shared router singleton - every node calls llm.acall(tier=...)
@@ -263,3 +337,66 @@ def audit_with_diff_cache_sync(diff, instructions, response_model, max_output_to
                           response_model=response_model,
                           max_output_tokens=max_output_tokens)
         return out, ""
+
+from contextlib import contextmanager
+
+@contextmanager
+def audit_trace(thread_id: str, label: str | None = None):
+    """Open ONE parent trace for a whole audit run so every node's LLM call nests under it
+    (instead of each call being its own orphan trace) and the run's scores can attach to it.
+    `label` IS the trace name in the dashboard (no 'pr-audit:' prefix - the whole project is the
+    PR auditor, so prefixing every trace with that is noise). Callers pass the surface+branch,
+    e.g. 'cli:develop' / 'ci:develop' / 'demo' / 'batch-cli:develop'. The raw thread_id stays in
+    metadata for correlation. No-op when Langfuse is unconfigured."""
+    lf = _langfuse()
+    if lf is None:
+        yield
+        return
+    name = label or "audit"
+    try:
+        with lf.start_as_current_observation(name=name, as_type="span",
+                                              metadata={"thread_id": thread_id,
+                                                        "branch": label}):
+            # Capture the OTEL context INSIDE the parent span and publish it, so _trace (running in
+            # other node tasks / the to_thread worker) re-attaches it and nests as a true child.
+            # The parent span starts first = trace root, so its name is the trace name.
+            token = _AUDIT_OTEL_CTX.set(_otel_ctx.get_current())
+            try:
+                yield
+            finally:
+                _AUDIT_OTEL_CTX.reset(token)
+    except Exception as e:
+        log.warning("Langfuse audit_trace failed (%s); continuing untraced.", e)
+        yield
+
+
+def score_audit(scores: dict[str, float]):
+    """Attach the audit's dimension scores to the CURRENT trace (the one audit_trace opened).
+    Best-effort: no client / no active trace -> no-op. Call from inside the audit_trace block."""
+    lf = _langfuse()
+    if lf is None:
+        return
+    for name, value in scores.items():
+        if value is None:
+            continue
+        try:
+            lf.score_current_trace(name=name, value=float(value), data_type="NUMERIC")
+        except Exception as e:
+            log.warning("Langfuse score '%s' failed (%s); continuing.", name, e)
+
+
+def flush_traces():
+    """Ship any buffered Langfuse spans and BLOCK until the network export finishes.
+    Call at the end of a run before the event loop / process tears down.
+
+    Uses shutdown(), not flush(): flush() only drains the span queue to the OTEL
+    exporter and returns - the actual HTTP POST runs on a background thread that the
+    process can abandon on exit (the cause of 'traces don't land' under
+    asyncio.run + sys.exit). shutdown() blocks until the POST completes. It's called
+    once at the end of a run, so making the client unusable afterward is fine."""
+    lf = _langfuse()
+    if lf is not None:
+        try:
+            lf.shutdown()
+        except Exception as e:
+            log.warning("Langfuse shutdown failed (%s); continuing.", e)

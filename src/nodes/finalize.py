@@ -26,10 +26,18 @@ def finalize_report_node(state: AMSState):
     ams = AMS(state)
     
     human_decision = ams.read("human_decision", "n/a")
+    # Stamp the branch so the per-branch score view (scripts/score_report.py --by-branch) and the
+    # Langfuse trace label agree. Resolved here (a leaf git call) to avoid threading it through state.
+    try:
+        from scripts.git_gate import current_branch
+        branch = current_branch()
+    except Exception:
+        branch = None
     report = {
         "security_score": ams.read("security_score",1.0),
         "quality_score": ams.read("quality_score",1.0),
         "test_score": ams.read("test_score", 1.0),
+        "branch": branch,
         "human_decision": human_decision,
         "status": _STATUS.get(human_decision,"passed"), 
         "iterations" : ams.read("iteration_count", 0),
