@@ -66,6 +66,24 @@ small prefix costs nothing extra. The diff clears the floor on large PRs (where 
 the prefix usually does not yet, so security's cache is a documented forward-looking path for a busy
 review queue rather than a live saving today.
 
+**Why gate extended thinking instead of always reasoning?** Gemini 2.5's thinking budget
+(`ThinkingConfig`) buys better reasoning for a real cost in tokens, so spending it on every audit
+would tax the routine majority to help the hard minority. The gate is a deterministic, no-LLM
+heuristic (`thinking_warranted`): more than one regulated framework, or a large diff that touches at
+least one. That keys off *regulatory interplay and size*, the two things that actually make an audit
+hard, and it stays cheap and auditable because it is pure string/set arithmetic on signals already
+fetched - no extra model call to decide whether to spend a model call. Only the security audit uses
+it, because it is the only node holding both inputs (the diff and the compliance passages) at once.
+On the complex slice it runs Pro-with-thinking; otherwise it takes the cache path or plain Flash.
+Thinking and the context cache are mutually exclusive on one call - a thinking call sends a fresh
+prompt, the cache reuses a stored one - so the dispatch picks one per audit rather than stacking
+them. The thinking path still routes through the one spine: it keeps Instructor structured output
+(a validated finding list, not raw text), inherits retry and key rotation, disables fallback like
+every deliberate tier-specific call and folds the reasoning tokens into the call's output cost so
+the trace prices it honestly. A quota exhaustion on the thinking call still aborts fail-closed; any
+other error recovers uncached on the same Pro tier rather than silently dropping the regulated audit
+to a cheaper model.
+
 **Why does the tier router re-raise `QuotaExhaustedError` instead of a generic error?** The router
 walks a fallback chain and, when every tier fails, raises. But the nodes' fail-closed contract keys off
 the *type*: `except QuotaExhaustedError` aborts the run rather than degrading to a clean score. If the
