@@ -2,7 +2,7 @@ import logging
 import hashlib
 from dataclasses import dataclass
 from src.llm_retry import (
-    call_cached_generate, call_gemini, call_gemini_async, call_thinking, QuotaExhaustedError,
+    call_cached_generate, call_gemini, call_gemini_async, QuotaExhaustedError,
 )
 import src.config as cfg
 import os, time
@@ -216,24 +216,6 @@ async def _acall_cached(model, stable_system, user_content, max_output_tokens,
     return await asyncio.to_thread(
         _cached_call, model, stable_system, user_content, max_output_tokens, response_schema)
 
-async def _acall_thinking(model, messages, response_model, max_output_tokens, thinking_budget=4000) -> LLMResult:
-    """Gemini thinking-budget call. `thinking_budget` is the reasoning-token budget the model may spend
-    before the answer (Gemini 2.5 thinking). Used ONLY for the complex slice (gated by src/complexity.py).
-    Goes through the spine's call_thinking - so it gets per-minute retry + per-day key-rotation +
-    fail-closed, AND instructor's typed response_model (a validated verdict, not raw text). The async-ness
-    is just the to_thread hop in call_thinking, same as _acall_gemini over call_gemini_async."""
-    import asyncio
-    parsed, raw = await asyncio.to_thread(
-        call_thinking, model, messages, response_model, max_output_tokens, thinking_budget)
-    um = raw.usage_metadata
-    # thoughts_token_count is the reasoning spend - bill it as output (it's charged at the output rate).
-    out_tok = (um.candidates_token_count or 0) + (getattr(um, "thoughts_token_count", 0) or 0)
-    in_tok = um.prompt_token_count or 0
-    return LLMResult(output=parsed, model=model,
-                     input_tokens=in_tok, output_tokens=out_tok,
-                     cost_usd=_price(model, in_tok, out_tok))
-
-
 class UnifiedLLMClient:
     """The router. `acall(tier=...)` picks a Gemini model from TIER_TABLE, executes through the spine,
     and on failure walks the fallback chain - recording which tier actually served the call.
@@ -241,8 +223,7 @@ class UnifiedLLMClient:
     Two optional flags select a Gemini-native call shape:
       - cache=True     -> `messages[0]` MUST be a system block list
                           built by cached_system() so the stable prefix is registered as a cache.
-      - thinking=N     -> thinking-budget path with budget N reasoning tokens. Takes plain chat
-                          `messages` + `response_model` (instructor), like the default path.
+      - thinking=N     -> thinking-budget path with budget N reasoning tokens.
     Fallback is DISABLED when cache/thinking is requested: those are deliberate, tier-specific calls
     (you asked for Pro+thinking), so silently falling back to a cheaper model would defeat the point -
     it raises instead, staying fail-closed and honest about which tier ran."""
@@ -257,11 +238,10 @@ class UnifiedLLMClient:
             if spec is None:
                 continue
             try:
-                # cache takes [cached_block, {'role':'user',...}]; thinking takes plain chat messages
-                # (instructor, like the default path) plus a reasoning budget.
+                # messages for the special paths are [system_blocks, {'role':'user','content':...}]
                 if thinking:
-                    res = await _acall_thinking(spec.model, messages, response_model,
-                                                max_output_tokens, thinking)
+                    res = await _acall_thinking(spec.model, messages[0]["content"],
+                                                messages[1]["content"], max_output_tokens,thinking)
                 elif cache:
                     res = await _acall_cached(spec.model, messages[0]["content"],
                                               messages[1]["content"], max_output_tokens,
@@ -281,28 +261,18 @@ class UnifiedLLMClient:
         raise _exhausted(last_err, tier)
 
     def call(self, tier: str = "fast", *, messages: list, response_model=None,
-             max_output_tokens: int = 2000, cache: bool = False) -> LLMResult:
-        """Sync twin of acall for the SEQUENTIAL nodes (plan/reflexion) that don't need the event
-        loop - same tier selection + fallback chain + fail-closed contract, on the sync spine.
-
-        cache=True selects the context-cache path (`messages[0]` is the cached part built by
-        cached_system()/cached_diff(), `messages[1]` the per-run variable part) through the sync
-        _cached_call core - the SAME core + _CACHE_HANDLES the async fan-out uses, so a sync cached
-        call reuses whatever handle the async nodes primed. As with acall, fallback is DISABLED for
-        the cache path (a deliberate, tier-specific call must not silently drop to a cheaper model).
-        No `thinking` flag here: thinking is the deep-reasoning slice and rides the async acall;
-        the sequential nodes that use this method don't reason that deeply."""
+             max_output_tokens: int = 2000) -> LLMResult:
+        """Sync twin of acall for the SEQUENTIAL nodes (plan/reflexion/compliance) that don't need the
+        event loop - same tier selection + fallback chain + fail-closed contract, on the sync spine.
+        No cache/thinking flags: those are async-only (they ride asyncio.to_thread), and the
+        sequential nodes don't cache anyway."""
         last_err = None
-        for i, t in enumerate(_resolve_chain(tier, special=cache)):
+        for i, t in enumerate(_resolve_chain(tier, special=False)):
             spec = TIER_TABLE.get(t)
             if spec is None:
                 continue
             try:
-                if cache:
-                    res = _cached_call(spec.model, messages[0]["content"], messages[1]["content"],
-                                       max_output_tokens, response_schema=response_model)
-                else:
-                    res = _call_gemini(spec.model, messages, response_model, max_output_tokens)
+                res = _call_gemini(spec.model, messages, response_model, max_output_tokens)
                 if i > 0:
                     res.fell_back_from = tier
                     log.warning("LLM tier '%s' failed; served by fallback '%s'", tier, t)
@@ -310,9 +280,12 @@ class UnifiedLLMClient:
                 return res
             except Exception as e:
                 last_err = e
-                if cache:
-                    break
         raise _exhausted(last_err, tier)
+
+# Forward-reference stubs yo be filled
+async def _acall_thinking(*a, **k):
+    raise NotImplementedError
+
 
 llm = UnifiedLLMClient()   # THE shared router singleton - every node calls llm.acall(tier=...)
 
@@ -322,35 +295,48 @@ def _diff_cache_note(res) -> str:
             f"output={res.output_tokens} cost=${res.cost_usd:.6f}\n")
 
 
-# Diff-cache helper for the async fan-out nodes (compliance/quality/coverage). They cache the DIFF (the
-# part identical across the Flash diff-nodes) and vary the instructions. compliance runs FIRST and primes
-# the handle (so the later nodes are pure reusers, no parallel create-race); quality/coverage then reuse
-# it. All share ONE handle (keyed by model+diff) because they share the Flash model - a CachedContent is
+# Shared docstring for the two diff-cache helpers. They cache the DIFF (the part identical across the
+# Flash diff-nodes) and vary the instructions. compliance runs FIRST and primes the handle (so the
+# later nodes are pure reusers, no parallel create-race); plan/quality/coverage then reuse it. All four
+# share ONE handle (keyed by model+diff) because they share the Flash model - a CachedContent is
 # model-bound, so security (Pro) can't join. On ANY cache failure (e.g. diff below Gemini's ~2048-token
-# floor) it retries plain (no cache, no note) so callers never branch. Both paths go through the router
-# (llm.acall) so the fan-out is traced. QuotaExhaustedError propagates (fail-closed). The sequential plan
-# node hits the same cache + handles via the sync router path (llm.call(cache=True)), not a separate helper.
+# floor) both fall back to a plain Flash call (no cache, no note) so callers never branch.
+# QuotaExhaustedError propagates (fail-closed). Sync twin exists for the SEQUENTIAL nodes (compliance is
+# async/fan-out-adjacent, plan is sync) - same cache, just with/without the event loop.
 
 async def audit_with_diff_cache(diff, instructions, response_model, max_output_tokens):
-    """Async diff-cache call for the fan-out + async nodes (compliance/quality/coverage). Routes through
-    the router (llm.acall) so the fan-out is tier-resolved + TRACED, not a side-door call. tier='balanced'
-    resolves to the Flash model the fan-out shares (so they keep ONE _CACHE_HANDLES handle). Returns
-    (parsed_response, cache_note). On a cache miss (e.g. diff below Gemini's ~2048-token floor) it retries
-    plain (no cache, empty note) - also through the router. QuotaExhaustedError propagates (fail-closed).
-    NOTE the two output shapes: the cache path returns native JSON (parse it), the plain acall path returns
-    an already-parsed Instructor model (use res.output directly - do NOT re-parse)."""
+    """Async diff-cache call for the fan-out + async nodes (compliance/quality/coverage). See module
+    note above _diff_cache_note for the shared design. Returns (parsed_response, cache_note)."""
     try:
-        res = await llm.acall(tier="balanced", cache=True,
-                              messages=[cached_diff(diff), {"role": "user", "content": instructions}],
-                              response_model=response_model, max_output_tokens=max_output_tokens)
+        res = await _acall_cached(cfg.GEMINI_FLASH_MODEL, diff, instructions,
+                                  max_output_tokens, response_schema=response_model)
         return response_model.model_validate_json(res.output), _diff_cache_note(res)
     except QuotaExhaustedError:
         raise
     except Exception:
-        res = await llm.acall(tier="balanced",
-                              messages=[{"role": "user", "content": instructions + "\n\n" + diff}],
-                              response_model=response_model, max_output_tokens=max_output_tokens)
-        return res.output, ""
+        out = await call_gemini_async(model=cfg.GEMINI_FLASH_MODEL,
+                                      messages=[{"role": "user", "content": instructions + "\n\n" + diff}],
+                                      response_model=response_model,
+                                      max_output_tokens=max_output_tokens)
+        return out, ""
+
+
+def audit_with_diff_cache_sync(diff, instructions, response_model, max_output_tokens):
+    """SYNC twin of audit_with_diff_cache for the sequential plan node (no event loop needed - it runs
+    alone). Hits the SAME _cached_call core and the SAME _CACHE_HANDLES, so it reuses whatever handle
+    compliance primed. Returns (parsed_response, cache_note)."""
+    try:
+        res = _cached_call(cfg.GEMINI_FLASH_MODEL, diff, instructions,
+                           max_output_tokens, response_schema=response_model)
+        return response_model.model_validate_json(res.output), _diff_cache_note(res)
+    except QuotaExhaustedError:
+        raise
+    except Exception:
+        out = call_gemini(model=cfg.GEMINI_FLASH_MODEL,
+                          messages=[{"role": "user", "content": instructions + "\n\n" + diff}],
+                          response_model=response_model,
+                          max_output_tokens=max_output_tokens)
+        return out, ""
 
 from contextlib import contextmanager
 

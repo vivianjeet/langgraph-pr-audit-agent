@@ -1,7 +1,7 @@
 from src.state import AuditPlan, Severity, RuleCategory
 from pydantic import BaseModel, Field
 from src.llm_retry import QuotaExhaustedError
-from src.llm_client import llm, cached_diff
+from src.llm_client import audit_with_diff_cache_sync
 from src.memory import AgentMemorySystem as AMS, AMSState
 from src.text_utils import clip as _clip
 import src.config as cfg
@@ -76,27 +76,9 @@ def plan_audit_node(state: AMSState):
         + precedent_block
         + "\nThe code diff is provided in context."
     )
-    # The diff is the cached part (shared with compliance/quality/coverage via the same _CACHE_HANDLES);
-    # the variable part is this node's instructions. cache=True routes through the sync router path -
-    # so this call is tier-routed + traced like the async fan-out, not a side-door helper. The cache
-    # path returns native JSON (no Instructor), so parse it here; a cache miss (e.g. diff below Gemini's
-    # ~2048-token floor) raises and we recover on a plain Flash call that returns an already-parsed object.
     try:
-        try:
-            res = llm.call(tier="balanced", cache=True,
-                           messages=[cached_diff(parsed_diff),
-                                     {"role": "user", "content": instructions}],
-                           response_model=PlanAuditOutput,
-                           max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
-            response = PlanAuditOutput.model_validate_json(res.output)
-        except QuotaExhaustedError:
-            raise
-        except Exception:
-            res = llm.call(tier="balanced",
-                           messages=[{"role": "user", "content": instructions + "\n\n" + parsed_diff}],
-                           response_model=PlanAuditOutput,
-                           max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
-            response = res.output
+        response, _ = audit_with_diff_cache_sync(
+            parsed_diff, instructions, PlanAuditOutput, cfg.AUDIT_MAX_OUTPUT_TOKENS)
     except QuotaExhaustedError:
         raise
     except Exception as e:

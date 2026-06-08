@@ -48,16 +48,12 @@ def test_quality_audit_skips_when_no_diff(patched_create, empty):
     assert "skipped" in out["audit"]["messages"][0]
 
 def test_quality_audit_falls_back_on_nonretryable_error(patched_create):
-    # A non-retryable error fails the cached call AND its plain retry; since the fan-out now routes
-    # through the router (llm.acall tier='balanced'), the plain retry also walks the balanced->fast
-    # fallback chain - so _raw_chat is attempted on both Flash and Flash-Lite (2 calls). What matters
-    # is the OUTCOME: all tiers exhausted -> node degrades to empty findings + a node_error.
-    patched_create.side_effect = RuntimeError("boom")
+    patched_create.side_effect = RuntimeError("boom")            # non-retryable -> called once
     out = asyncio.run(
         qual_mod.quality_audit_node({"audit": {"parsed_diff": "x", "messages": []}})
     )
+    patched_create.assert_called_once()
     assert out["audit"]["quality_findings"] == []
-    assert out["audit"]["node_errors"]                            # the failure was recorded
 
 def test_quality_audit_degrades_on_transient_error(patched_create):
     patched_create.side_effect = RuntimeError("503 Service Unavailable")

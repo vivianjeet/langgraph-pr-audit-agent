@@ -49,23 +49,3 @@ def test_all_tiers_failing_on_other_error_raises_runtimeerror():
     with patch.object(lc, "call_gemini_async", AsyncMock(side_effect=RuntimeError("boom"))):
         with pytest.raises(RuntimeError, match="all LLM tiers failed"):
             asyncio.run(lc.UnifiedLLMClient().acall(tier="balanced", messages=[{"role": "user", "content": "x"}]))
-
-
-def test_acall_thinking_builds_result_and_folds_thinking_tokens():
-    # The router shim over call_thinking must: (1) put the PARSED model on res.output (not the raw
-    # response), and (2) fold thoughts_token_count INTO output_tokens (thinking is billed at the output
-    # rate, and dominates cost on 2.5). Pins the shim body the security test mocks past.
-    class _UM:
-        prompt_token_count = 100
-        candidates_token_count = 40
-        thoughts_token_count = 300
-    class _Raw:
-        usage_metadata = _UM()
-    def _fake_call_thinking(model, messages, response_model, max_output_tokens, thinking_budget):
-        return ("PARSED-VERDICT", _Raw())               # (parsed, raw)
-    with patch.object(lc, "call_thinking", side_effect=_fake_call_thinking):
-        res = asyncio.run(lc._acall_thinking("gemini-2.5-flash", [], object, 600, 4000))
-    assert res.output == "PARSED-VERDICT"               # parsed model, not the raw response
-    assert res.input_tokens == 100
-    assert res.output_tokens == 40 + 300                # candidates + thoughts folded together
-    assert res.cost_usd > 0                             # priced off the folded counts

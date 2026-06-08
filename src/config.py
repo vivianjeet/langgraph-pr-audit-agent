@@ -37,11 +37,6 @@ COMPLIANCE_MAX_OUTPUT_TOKENS = 2000    # src/nodes/compliance.py (regulatory tri
 CITATION_MAX_OUTPUT_TOKENS   = 1024    # src/citations.py (grounded-citation extraction)
 SUMMARY_MAX_OUTPUT_TOKENS    = 1024    # src/compression.py (history-summary output)
 
-# ════════════════════════════ Extended thinking (Gemini 2.5 ThinkingConfig) ════════════════════════════
-# The reasoning-token budget the model may spend BEFORE the answer, on the complex slice only (gated by
-# src/complexity.py's thinking_warranted). Used by src/nodes/security_audit.py via llm.acall(thinking=).
-THINKING_BUDGET = 4000
-
 # ════════════════════════════ History compression (src/compression.py) ════════════════════════════
 # All used only in src/compression.py: the trigger threshold, the fold ratio, the recent-message
 # floor and the demo context budget the standalone pass runs against.
