@@ -1,4 +1,5 @@
 from src.memory import AgentMemorySystem as AMS, AMSState
+from src.llm_client import score_audit
 import src.config as cfg
 
 
@@ -46,7 +47,13 @@ def synthesize_report_node(state: AMSState):
 
     if audit_errors:
         summary += f"\n⚠ FAIL-CLOSED: audit node(s) errored, scores forced to 0.0: {audit_errors}"
-    
+
+    # Attach the three dimension scores to the run's Langfuse trace (no-op if unconfigured).
+    # Sent separately, not combined - the system escalates on the worst axis, it never aggregates.
+    score_audit({"security_score": sec_score,
+                 "quality_score": qual_score,
+                 "test_score": test_score})
+
     return {"audit": {
         "messages" : [summary],
         "security_score": sec_score,

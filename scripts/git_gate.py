@@ -7,6 +7,24 @@ def in_ci() -> bool:
     return bool(os.environ.get("GITHUB_ACTIONS") or os.environ.get("CI"))
 
 
+def current_branch() -> str | None:
+    """The git branch being audited, for labelling traces/runs. In CI the checkout is often
+    detached HEAD, so prefer GitHub's GITHUB_HEAD_REF (PR source branch) / GITHUB_REF_NAME.
+    Returns None if it can't be determined (not a repo, git missing) - callers degrade to a
+    generic label."""
+    for var in ("GITHUB_HEAD_REF", "GITHUB_REF_NAME"):
+        v = os.environ.get(var)
+        if v:
+            return v
+    try:
+        r = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True)
+        name = r.stdout.strip()
+        return name if r.returncode == 0 and name and name != "HEAD" else None
+    except Exception:
+        return None
+
+
 def github_token() -> str | None:
     """Auth source, in order: CI's injected GITHUB_TOKEN/GH_TOKEN, then the locally logged-in
     gh CLI. So a developer with `gh auth login` done needs NO extra token; CI uses the env var
