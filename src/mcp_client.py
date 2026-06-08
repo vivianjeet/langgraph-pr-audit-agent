@@ -1,4 +1,4 @@
-# src/mcp_client.py - stand up external MCP servers and expose their tools to the agent.
+# stand up external MCP servers and expose their tools to the agent.
 # Servers (stdio transport = each is a subprocess we talk to over stdin/stdout):
 #   - compliance (ours, src/mcp/compliance_rag_server.py): search_compliance_docs + get_pr_audit_history.
 # Tools come back as LangChain StructuredTools via langchain-mcp-adapters, directly awaitable.
