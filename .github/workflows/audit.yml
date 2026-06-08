@@ -75,13 +75,21 @@ jobs:
       GEMINI_API_KEY2: ${{ secrets.GEMINI_API_KEY2 }}
       GEMINI_API_KEY3: ${{ secrets.GEMINI_API_KEY3 }}
       GEMINI_API_KEY4: ${{ secrets.GEMINI_API_KEY4 }}
-      # LangSmith tracing is opt-in via env vars (no app code). Set these and the gate's run is
-      # traced to your LangSmith project; leave them out and the audit runs identically, untraced.
-      # Only the API key is a secret; the rest are plain (not sensitive).
-      LANGCHAIN_TRACING_V2: "true"
+      # Both tracers are opt-in and follow ONE convention: the API key is a repo Secret, the
+      # non-sensitive config (project / endpoint / host) are repo Variables and only a hardcoded
+      # on-switch stays a literal. So a fork configures tracing entirely from Settings > Secrets and
+      # variables > Actions - never by editing this workflow. An unset key leaves the run untraced.
+      #
+      # LangSmith. Activates when LANGCHAIN_API_KEY is set.
+      LANGCHAIN_TRACING_V2: "true"   # a flag, not config - stays a literal
       LANGCHAIN_API_KEY: ${{ secrets.LANGCHAIN_API_KEY }}
-      LANGCHAIN_PROJECT: "langgraph-pr-audit-agent"
-      LANGCHAIN_ENDPOINT: "https://api.smith.langchain.com"
+      LANGCHAIN_PROJECT: ${{ vars.LANGCHAIN_PROJECT }}
+      LANGCHAIN_ENDPOINT: ${{ vars.LANGCHAIN_ENDPOINT }}
+      # Langfuse (v4 SDK, OTEL-based). Activates when LANGFUSE_PUBLIC_KEY is set (src/llm_client.py
+      # gates on it), so an unset Variable leaves CI runs untraced - the no-op path.
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ vars.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_HOST: ${{ vars.LANGFUSE_HOST }}
       # EDIT HERE: "1" runs the gate with the --large flag (force compression); "0" runs a plain
       # audit (compression auto-fires only). Both audit the real PR diff and gate the build.
       USE_LARGE: "1"

@@ -159,12 +159,6 @@ async def run_gate(large: bool, durable: bool = False):
     ci = in_ci()
     base = resolve_base(ci)
 
-    if ci:
-        if escalated:
-            print("::error::Audit escalated and the PR verdict is not 'approve'. Blocking merge.")
-            sys.exit(1)
-        sys.exit(0)
-
     diff = resolve_diff(demo=False, base=base)
     if durable:
         from src.graph import durable_app

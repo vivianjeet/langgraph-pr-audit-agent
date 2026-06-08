@@ -3,8 +3,11 @@ from src.memory import AgentMemorySystem as AMS, AMSState
 
 def parse_github_diff(diff_text: str) -> tuple[str, list[str]]:
     """
-    Parses a raw git diff and extracts added/modified lines per file.
-    Reduces token usage by stripping out unchanged context lines
+    Parses a raw git diff and extracts changed lines per file, keeping the surrounding
+    code as labelled context. The diff is produced with --function-context, so each hunk
+    carries its enclosing function: an auditor can tell a duplicate/relocated block from a
+    real removal instead of judging a bare [REMOVED] in isolation. Context lines cost tokens
+    but the diff is the cached part of the audit, so the extra is paid once and reused.
     """
     parsed_output: list[str] = []
     files_changed: list[str] = []
@@ -22,12 +25,19 @@ def parse_github_diff(diff_text: str) -> tuple[str, list[str]]:
             parsed_output.append(f"\n[FILE MODIFIED]: {current_file}")
             continue
 
+        if not current_file:
+            continue
+
         # Capture added lines (starting with +, but not the +++ header)
-        if line.startswith('+') and not line.startswith('+++') and current_file:
+        if line.startswith('+') and not line.startswith('+++'):
             parsed_output.append(f"[ADDED]: {line[1:]}")
-        # Capture removed lines
-        if line.startswith('-') and not line.startswith('---') and current_file:
+        # Capture removed lines (starting with -, but not the --- header)
+        elif line.startswith('-') and not line.startswith('---'):
             parsed_output.append(f"[REMOVED]: {line[1:]}")
+        # Keep unchanged context lines (a leading space) so a change is read in situ, not blind.
+        # Skip hunk headers (@@ ...) and the no-newline marker; they aren't source.
+        elif line.startswith(' '):
+            parsed_output.append(f"[CONTEXT]: {line[1:]}")
 
     return "\n".join(parsed_output), files_changed
 

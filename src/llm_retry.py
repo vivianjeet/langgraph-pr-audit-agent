@@ -24,7 +24,7 @@ _KEYS = [k for k in (
     os.environ.get("GEMINI_API_KEY4"),
 ) if k]
 if not _KEYS:
-    raise RuntimeError("No GEMINI_API_KEY[/2/3] found in environment.")
+    raise RuntimeError("No GEMINI_API_KEY[/2/3/4] found in environment.")
 _key_idx = 0
 
 _RETRYABLE_CODES = ("429", "500", "502", "503", "504")

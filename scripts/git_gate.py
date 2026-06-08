@@ -89,7 +89,14 @@ def _git_diff(base: str, in_ci: bool) -> str:
     if not in_ci:
         subprocess.run(["git", "fetch", "origin", base], capture_output=True, text=True)
     ref = f"origin/{base}"
-    result = subprocess.run(["git", "diff", f"{ref}...HEAD"], capture_output=True, text=True)
+    # --function-context expands each hunk to its enclosing function; -U15 sets a 15-line floor for
+    # code that has no function to expand to (module level, YAML, config). git takes the larger of
+    # the two per hunk. ingest.py keeps these context lines as [CONTEXT] so the auditor reads a
+    # change in situ - the fix for a removed-block reading as a control removal when it was a dedup.
+    result = subprocess.run(
+        ["git", "diff", "--function-context", "-U15", f"{ref}...HEAD"],
+        capture_output=True, text=True,
+    )
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
