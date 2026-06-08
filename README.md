@@ -842,11 +842,13 @@ Everything lives under *Settings → Secrets and variables → Actions*.
 | `GEMINI_API_KEY` | **Yes** (for the `gate` job) | the audit's Gemini calls |
 | `GEMINI_API_KEY2`, `GEMINI_API_KEY3`, `GEMINI_API_KEY4` | Optional | extra keys the resilience layer rotates to on quota exhaustion. The default workflow forwards only `GEMINI_API_KEY`; add a line per extra key in the `gate` job's `env:` if you want CI rotation too. |
 | `LANGCHAIN_API_KEY` | Optional | enables LangSmith tracing of the gate's run. Only needed if you want CI traces; the audit runs identically without it. |
+| `LANGFUSE_SECRET_KEY` | Optional | enables Langfuse cost/score tracing of the gate's run. Runs alongside LangSmith, not instead of it; only needed for CI traces. |
 | `GITHUB_TOKEN` | **No - auto-injected** | GitHub Actions provides it for free; the gate uses it (via `gh`) to read the PR's approval state. You do not create this. |
 
-The non-sensitive LangSmith settings (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_PROJECT`, `LANGCHAIN_ENDPOINT`)
-are **not** secrets - they are plain values already in the `gate` job's `env:`. Tracing switches on only
-when `LANGCHAIN_API_KEY` is also present.
+Both tracers follow one convention: the **API key is a Secret**, the non-sensitive config is a
+**Variable** (below) and only a hardcoded on-switch (`LANGCHAIN_TRACING_V2: "true"`) stays a literal in
+the workflow. So you configure tracing entirely from Settings - never by editing the YAML. LangSmith
+activates when `LANGCHAIN_API_KEY` is set; Langfuse activates when `LANGFUSE_PUBLIC_KEY` is set.
 
 > **Do not copy your local `.env` wholesale into Secrets.** `DATABASE_URL` and the `POSTGRES_*`
 > values are local-only: in CI the gate talks to its own pgvector **service container**
@@ -859,6 +861,10 @@ when `LANGCHAIN_API_KEY` is also present.
 | Variable | Set to | Purpose |
 |----------|--------|---------|
 | `RUN_AUDIT_GATE` | `true` | turns the `gate` job on (it is **off by default**, so a fresh fork only runs the free `tests` job) |
+| `LANGCHAIN_PROJECT` | e.g. `langgraph-pr-audit-agent` | the LangSmith project the gate's traces land in. Only read when `LANGCHAIN_API_KEY` is set. |
+| `LANGCHAIN_ENDPOINT` | `https://api.smith.langchain.com` | LangSmith API host (change only for a self-hosted instance). |
+| `LANGFUSE_PUBLIC_KEY` | your `pk-lf-...` | publishable Langfuse key; **its presence is what switches Langfuse tracing on** in CI. |
+| `LANGFUSE_HOST` | `https://cloud.langfuse.com` | Langfuse host (change for a self-hosted or EU-region instance). |
 
 ### Tuning the gate (edit the YAML)
 
@@ -947,6 +953,10 @@ Then run any audit and read spend back from the CLI:
 python main.py --demo
 python -m scripts.cost_report           # per-tier spend + fallback events
 ```
+
+The same trace is produced in CI: when the audit gate runs with these keys set as repo
+Secrets/Variables (see [What to configure in GitHub](#what-to-configure-in-github-one-time)), each
+gate run lands as a `ci:<branch>` trace alongside the local `cli:<branch>` ones.
 
 > **Fail-closed on providers, fail-soft on observability.** A dead provider with no fallback
 > raises (no fabricated clean audit); a dead or unconfigured Langfuse is a no-op trace - an audit
