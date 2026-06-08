@@ -95,6 +95,12 @@ async def security_audit_node(state: AMSState):
     ]
 
     cache_note = ""
+    # Per-run accounting stashed onto the audit channel for the integration table (Option A):
+    # the served tier + whether thinking engaged + the call's cost. Each branch below sets these
+    # off its own `res`; the plain-Flash path is the cheap default that proves no silent upgrade.
+    served_tier = "flash"
+    served_thinking = False
+    served_cost = 0.0
     if compliance and thinking_warranted(parsed_diff, compliance):
         # The complex slice: a multi-framework or large regulated change. Spend a reasoning budget on Pro
         # (extended thinking) instead of caching - thinking and cache are mutually exclusive in the router,
@@ -105,6 +111,7 @@ async def security_audit_node(state: AMSState):
                                   messages=messages, response_model=SecurityAuditOutput,
                                   max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
             response = res.output
+            served_tier, served_thinking, served_cost = "powerful", True, res.cost_usd
             cache_note = (f"Thinking: budget={cfg.THINKING_BUDGET} input={res.input_tokens} "
                           f"output={res.output_tokens} cost=${res.cost_usd:.6f}\n")
         except QuotaExhaustedError:
@@ -117,6 +124,7 @@ async def security_audit_node(state: AMSState):
                                   response_model=SecurityAuditOutput,
                                   max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
             response = res.output
+            served_tier, served_thinking, served_cost = "powerful", False, res.cost_usd
     elif compliance:
         # Security caches the PREFIX (instructions+rules+compliance), NOT the diff - the opposite axis
         # from the other Flash nodes (which cache the diff via audit_with_diff_cache). The prefix is
@@ -135,6 +143,7 @@ async def security_audit_node(state: AMSState):
                                              {"role": "user", "content": diff_msg}],
                                     max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
             response = SecurityAuditOutput.model_validate_json(res.output)
+            served_tier, served_thinking, served_cost = "powerful", False, res.cost_usd
             # Cache observability: cache_read_tokens>0 on a repeat run is the proof the stable
             # prefix was served from the CachedContent (claim). Surface it on the message.
             cache_note = (f"Cache: read={res.cache_read_tokens} input={res.input_tokens} "
@@ -156,6 +165,7 @@ async def security_audit_node(state: AMSState):
                                   response_model=SecurityAuditOutput,
                                   max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
             response = res.output
+            served_tier, served_thinking, served_cost = "powerful", False, res.cost_usd
     else:
         # Unregulated diff: a plain Flash audit through the router (tier='balanced') so it's tier-resolved
         # + traced like every other node, not a side-door call. Instructor path -> res.output is an
@@ -165,6 +175,7 @@ async def security_audit_node(state: AMSState):
                                   response_model=SecurityAuditOutput,
                                   max_output_tokens=cfg.AUDIT_MAX_OUTPUT_TOKENS)
             response = res.output
+            served_tier, served_thinking, served_cost = "flash", False, res.cost_usd
         except QuotaExhaustedError:
             raise
         except Exception as e:
@@ -184,5 +195,8 @@ async def security_audit_node(state: AMSState):
 
     return {"audit": {
         "messages" : [new_message],
-        "security_findings": response.findings
+        "security_findings": response.findings,
+        "llm_cost_usd": served_cost,
+        "llm_tier": served_tier,
+        "llm_thinking": served_thinking,
     }}

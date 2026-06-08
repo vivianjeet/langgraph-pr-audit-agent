@@ -102,6 +102,13 @@ class AuditState(TypedDict):
     quality_score: float
     test_score: float
 
+    # Per-run LLM accounting the security node stashes so it rides the audit channel out to
+    # the integration table (the router computes it on LLMResult, which is otherwise discarded).
+    # Only the security node writes them; last-writer-wins under merge_audit, no clobber.
+    llm_cost_usd: float    # the security call's cost in USD
+    llm_tier: str          # "powerful" (thinking/cache regulated path) or "flash" (plain)
+    llm_thinking: bool     # True only on the extended-thinking branch
+
     # Routing and Safety Flags
     human_decision: str
     iteration_count: int

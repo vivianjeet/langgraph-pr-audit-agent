@@ -28,16 +28,23 @@ async def _run(name, diff):
         "citations": len(audit.get("compliance_citations", [])),
         "escalated": escalated,
         "sec_score": audit.get("security_score"),
+        # The security node stashes these on the audit channel (state.py): which tier served,
+        # whether thinking engaged, the call's cost. The cheap fixture must show flash / N.
+        "tier": audit.get("llm_tier", "flash"),
+        "thinking": "Y" if audit.get("llm_thinking") else "N",
+        "cost": audit.get("llm_cost_usd", 0.0),
     }
 
 
 async def main():
     rows = [await _run(n, d) for n, d in ALL.items()]
-    hdr = f"{'PR':8s}{'secs':>6s}{'secF':>6s}{'compl':>7s}{'cites':>7s}{'escal':>7s}{'secScore':>10s}"
+    hdr = (f"{'PR':8s}{'secs':>6s}{'secF':>6s}{'compl':>7s}{'cites':>7s}{'escal':>7s}"
+           f"{'secScore':>10s}{'tier':>9s}{'think':>6s}{'cost$':>9s}")
     print(hdr)
     for r in rows:
         print(f"{r['name']:8s}{r['secs']:6.1f}{r['sec_findings']:6d}{r['compliance_hits']:7d}"
-              f"{r['citations']:7d}{str(r['escalated']):>7s}{str(r['sec_score']):>10s}")
+              f"{r['citations']:7d}{str(r['escalated']):>7s}{str(r['sec_score']):>10s}"
+              f"{r['tier']:>9s}{r['thinking']:>6s}{r['cost']:>9.6f}")
 
 if __name__ == "__main__":
     asyncio.run(main())
