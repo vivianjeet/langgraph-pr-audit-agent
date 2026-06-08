@@ -648,22 +648,28 @@ python -m scripts.integration_pass --findings # also list each finding's dimensi
 `scripts/integration_pass.py` runs five representative diffs end to end against live Gemini and the
 compliance corpus. A recent pass:
 
-| PR        | secs | security findings | compliance hits | citations | escalated | security score |
-| --------- | ---- | ----------------- | --------------- | --------- | --------- | -------------- |
-| sqli      | 37.0 | 1                 | 2               | 1         | yes       | 0.40           |
-| pii       | 37.3 | 1                 | 7               | 1         | yes       | 0.40           |
-| auth      | 51.0 | 1                 | 0               | 0         | yes       | 0.40           |
-| clean     | 15.8 | 0                 | 0               | 0         | no        | 1.00           |
-| quality   | 27.2 | 0                 | 0               | 0         | yes       | 1.00           |
+| PR        | secs | security findings | compliance hits | citations | escalated | security score | tier     | thinking | cost $   |
+| --------- | ---- | ----------------- | --------------- | --------- | --------- | -------------- | -------- | -------- | -------- |
+| sqli      | 48.8 | 1                 | 1               | 1         | yes       | 0.40           | powerful | no       | 0.000000 |
+| pii       | 42.2 | 1                 | 4               | 1         | yes       | 0.70           | powerful | yes      | 0.017007 |
+| auth      | 33.4 | 1                 | 0               | 0         | yes       | 0.40           | flash    | no       | 0.000000 |
+| clean     | 21.2 | 0                 | 0               | 0         | no        | 1.00           | flash    | no       | 0.000000 |
+| quality   | 102.7| 0                 | 0               | 0         | no        | 1.00           | flash    | no       | 0.000000 |
 
 How to read it:
 - **sqli / pii / auth** carry a real CRITICAL security issue: each escalates and pauses for human review,
   and the regulated ones (sqli, pii) ground findings in compliance passages with verified citations.
 - **clean** (a pure rename) passes with a perfect score and no escalation - a benign change is not flagged.
 - **quality** (a god-object) has no security issue (score 1.00) but its *quality* score drops on the
-  pile of maintainability findings, so it escalates on that dimension. Scores are multiplicative, so
-  several moderate findings trend low with diminishing returns rather than collapsing straight to zero
-  - severity drives the risk, not raw finding count.
+  pile of maintainability findings. Scores are multiplicative, so several moderate findings trend low
+  with diminishing returns rather than collapsing straight to zero - severity drives the risk, not raw
+  finding count.
+- **tier / thinking / cost** show the model routing earn its keep: only `pii` (a multi-framework
+  regulated diff) takes Pro with an extended-thinking budget, at a real measured cost; `sqli` is regulated
+  but single-framework so it runs Pro via the cache path; the unregulated `auth` / `clean` / `quality`
+  stay on cheap Flash with no thinking - the expensive path is reserved for the PR that earns it. (The
+  `$0.000000` rows are served from cache or Flash below the billable-token floor; `pii`'s thinking pass
+  carries the run's real spend.)
 
 Latency is dominated by the live Gemini calls (the three audit dimensions plus planning and compliance);
 times vary with rate-limit backoff. Numbers are illustrative of one run, not a fixed benchmark.
